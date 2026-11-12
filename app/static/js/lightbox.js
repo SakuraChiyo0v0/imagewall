@@ -19,6 +19,9 @@ const STRIP_W = 62;    // 胶片条每格宽（含间距）
 const PLAY_MS = 5000;
 
 const mod = (a, n) => ((a % n) + n) % n;
+const SIDE_SCALE = 0.66; // 相邻那张的缩放
+const SIDE_FRAC = 0.21;  // 两侧各占的屏幕宽度比例（中间图只占剩下的 58%）
+const FAR_SCALE = 0.5;   // 再往外一张的缩放
 
 export class Lightbox {
   constructor({ getList, getOpt, rectFor, thumbFor, thumbElFor, onOpen, onClose }) {
@@ -250,20 +253,71 @@ export class Lightbox {
     this._strip(first);
   }
 
+  /**
+   * 两侧预览的定位：以中间那张为基准，对称排开。
+   *
+   * 间距必须按「中间图的实际宽度」算，不能按视口宽度乘个系数了事：
+   * 4K 屏中间图能有 3000px 宽，固定的 980px 间距会让两侧直接压在中间图上。
+   *
+   * 但要留出「两侧也看得见」的空间：间距取
+   *   中间图半宽 + 相邻那张缩放后半宽 + 留白，再夹在可用宽度内。
+   * 这样 1080p 和 4K 都不会重叠，也不会把两侧推到屏幕外。
+   */
   _slideTf(o, extra = 0) {
-    const w = this.vw;
-    const gap = w < 700 ? w * 0.96 : Math.min(w * 0.58, 980);
     const a = Math.abs(o);
-    const s = a === 0 ? 1 : a === 1 ? 0.66 : 0.5;
-    const x = o * gap + Math.sign(o) * Math.max(0, a - 1) * gap * 0.25 + extra;
-    return `translate3d(${x}px,0,0) scale(${s})`;
+    if (!a) return `translate3d(${extra}px,0,0) scale(1)`;
+    const s = a === 1 ? SIDE_SCALE : FAR_SCALE;
+    const step = this._step();               // 相邻两张的中心距
+    const x = Math.sign(o) * (step + (a - 1) * step * 0.62);
+    return `translate3d(${x + extra}px,0,0) scale(${s})`;
+  }
+
+  /** 相邻两张的中心距：既要不压住中间那张，又要让两边露得出来。 */
+  _step() {
+    const vw = this.vw;
+    const curW = this._curWidth();
+    // 左右两张的宽度可能差很多（一边横图一边竖图），取更宽的那个来算，否则宽的那边会压过来
+    const l = this._neighbourWidth(-1) * SIDE_SCALE;
+    const r = this._neighbourWidth(1) * SIDE_SCALE;
+    const nbW = Math.max(l, r);
+    // 中心距 = 中间半宽 + 邻居渲染后半宽 + 小留白。中间图宽度已经按「两侧各留 SIDE_FRAC」封顶，
+    // 所以这个值天然落在屏幕内，不会把两侧挤出去，也不会压住中间图。
+    return curW / 2 + nbW / 2 + Math.max(12, vw * 0.008);
+  }
+
+  /**
+   * 某一侧相邻那张的原始宽度（未缩放）。dir = -1 左 / +1 右。
+   * 两侧预览不需要按「大图」的尺寸上限算：那张图上屏之后还要乘 SIDE_SCALE，
+   * 按满幅算会让一个超宽邻居算出 900 多像素，把间距撑得离谱。
+   * 这里按中间那张的宽度封顶。
+   */
+  _neighbourWidth(dir = 1) {
+    const list = this.getList();
+    if (!list.length) return this._curWidth();
+    // 优先用这一张自己框的实际宽度（未缩放），它才是真正会占地方的那个尺寸
+    const s = this.slides.get(this.pos + dir);
+    if (s && s.box && s.box.offsetWidth) return s.box.offsetWidth;
+    const w = this._fit(list[mod(this.pos + dir, list.length)], null).w;
+    return Math.min(w, this._curWidth());
+  }
+
+  /** 中间那张在屏幕上的宽度（还没量到就按可用宽度的上限估算）。 */
+  _curWidth() {
+    const s = this.slides.get(this.pos);
+    if (s && s.box && s.box.offsetWidth) return s.box.offsetWidth;
+    // 没量到就按「两侧各留 SIDE_FRAC」后的中间宽度上限估
+    const small = this.vw < 700;
+    return this.vw * (small ? 0.96 : 0.84);
   }
 
   /** 大图在屏幕上的最终大小：按原图宽高比放进可用区域（小图不放大到超过原图像素）。 */
   _fit(im, natural) {
     const vw = this.vw, vh = this.vh;
     const small = vw < 700;
-    const maxW = vw * (small ? 0.96 : 0.84);
+    // 中间图最多占中间那一条：两侧各留 SIDE_FRAC 的屏宽给预览。
+    // 按比例留（而不是固定像素）是因为屏幕越大，固定像素占的比例越小，
+    // 4K 上就会让两侧显得挤在边上。
+    const maxW = small ? vw * 0.96 : vw * (1 - SIDE_FRAC * 2);
     const maxH = vh - (small ? 164 : 182);
     let a = (im.a || 0) / 100;
     if (!a && natural && natural.h) a = natural.w / natural.h;
