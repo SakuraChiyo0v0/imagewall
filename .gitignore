@@ -5,3 +5,6 @@ node_modules/
 /tmp/
 *.tmp
 .DS_Store
+
+# 调研截图是别人的作品，只留本地
+docs/research/

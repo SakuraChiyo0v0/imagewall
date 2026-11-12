@@ -119,11 +119,16 @@ await sleep(1000);
 const pt = await ev(`(() => {
   // 缩到最小时块很小，要求整块都在视口内可能一块都找不到；只看中心点落在中间区域
   const tiles = [...document.querySelectorAll('.tile.loaded')];
-  const t = tiles.find((el) => {
+  const inside = (el) => {
     const r = el.getBoundingClientRect();
     const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
-    return cx > innerWidth * 0.3 && cx < innerWidth * 0.7 && cy > innerHeight * 0.3 && cy < innerHeight * 0.7;
-  }) || tiles[0];
+    return cx > 200 && cx < innerWidth - 200 && cy > 200 && cy < innerHeight - 200;
+  };
+  const t = tiles.find(inside) || tiles.find((el) => {
+    const r = el.getBoundingClientRect();
+    const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+    return cx > 80 && cx < innerWidth - 80 && cy > 80 && cy < innerHeight - 80;
+  });
   if (!t || !t._rec) return null;
   const r = t.getBoundingClientRect();
   return { x: r.left + r.width / 2, y: r.top + r.height / 2, p: t._rec.im.p };
