@@ -84,14 +84,18 @@ await ev(`(() => {
 })()`);
 
 const tile = await ev(`(() => {
-  const t = [...document.querySelectorAll('.tile.loaded')].find((el) => {
-    const r = el.getBoundingClientRect(); const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
-    return r.left > 0 && r.top > 60 && r.right < innerWidth && r.bottom < innerHeight
-      && cx > innerWidth * .2 && cx < innerWidth * .8 && cy > innerHeight * .25 && cy < innerHeight * .75;
-  }) || [...document.querySelectorAll('.tile.loaded')].find((el) => { const r = el.getBoundingClientRect(); return r.left > 0 && r.top > 60 && r.right < innerWidth && r.bottom < innerHeight; })
-    || [...document.querySelectorAll('.tile.loaded')].find((el) => { const r = el.getBoundingClientRect(); const cx = Math.min(Math.max(r.left + r.width / 2, 40), innerWidth - 40), cy = Math.min(Math.max(r.top + r.height / 2, 130), innerHeight - 130); return cx > r.left && cx < r.right && cy > r.top && cy < r.bottom; });
-  const r = t.getBoundingClientRect();
-  return { x: r.left + r.width / 2, y: r.top + r.height / 2, rect: [r.left, r.top, r.width, r.height].map(Math.round), a: t._rec.im.a };
+  const W = __wall.wall;
+  // 直接问画布：找出一个「中心落在安全区域内」的块，再用同一条公式算它的屏幕位置
+  const safe = (x, y) => x > innerWidth * 0.25 && x < innerWidth * 0.75 && y > innerHeight * 0.3 && y < innerHeight * 0.7;
+  let best = null;
+  for (const r of W.tiles.values()) {
+    if (!r.img) continue;
+    const cx = (r.x + r.w / 2) * W.z + W.tx, cy = (r.y + r.h / 2) * W.z + W.ty;
+    if (safe(cx, cy)) { best = { r, cx, cy }; break; }
+  }
+  if (!best) { const r = [...W.tiles.values()].find((v) => v.img); best = { r, cx: Math.min(innerWidth - 60, Math.max(60, (r.x + r.w / 2) * W.z + W.tx)), cy: Math.min(innerHeight - 160, Math.max(170, (r.y + r.h / 2) * W.z + W.ty)) }; }
+  const { r, cx, cy } = best;
+  return { x: cx, y: cy, rect: [r.x * W.z + W.tx, r.y * W.z + W.ty, r.w * W.z, r.h * W.z].map(Math.round), a: r.im.a };
 })()`);
 
 await ev('__open.t0 = performance.now()');

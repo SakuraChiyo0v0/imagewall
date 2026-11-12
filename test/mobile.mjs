@@ -77,9 +77,10 @@ await ev(`(() => {
       const sx = r.x * W.z + W.tx, sy = r.y * W.z + W.ty;
       if (sx + r.w * W.z < 0 || sy + r.h * W.z < 0 || sx > innerWidth || sy > innerHeight) continue;
       const k = Math.round(r.x) + ',' + Math.round(r.y);
-      const shown = [...r.el.querySelectorAll('img')].some((im) => +getComputedStyle(im).opacity > 0.95);
+      // 「看得见」= 块里任意一张 img 完全不透明（升级清晰度时旧图垫在下面也算）
+      const shown = [...r.el.querySelectorAll('img')].some((im) => im.isConnected && +getComputedStyle(im).opacity > 0.95);
       if (shown) F.seen.add(k);
-      else if (F.seen.has(k)) { F.n++; const w = !r.img ? 'noimg' : 'op'; F.why[w] = (F.why[w] || 0) + 1; }
+      else if (F.seen.has(k)) { F.n++; const w = !r.el.querySelector('img') ? 'noimg' : 'op'; F.why[w] = (F.why[w] || 0) + 1; }
     }
     requestAnimationFrame(loop);
   };
