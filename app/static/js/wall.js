@@ -14,7 +14,9 @@ import { buildMosaic } from './layout/mosaic.js';
 import { clamp } from './util.js';
 import { thumbUrl } from './api.js';
 
-export const ZMIN = 0.3;
+export const ZMIN = 0.12;
+// 缩到这个比例以下就不逐个建块了：一屏几千块会卡死，改成画一张色块缩略图
+export const ZOVERVIEW = 0.22;
 export const ZMAX = 2.4;
 
 const BUCKETS = [160, 240, 320, 480, 640, 800, 1200, 1600, 2400];
@@ -82,6 +84,8 @@ export class Wall {
 
     this.tiles = new Map();   // key → rec
     this.pool = [];
+    // 错列形式：每列一个容器，各自带一个竖直视差（只改 transform，不碰块本身）
+    this.cols = new Map();    // 列号 → { el, speed, offset }
     this.cache = new ImgCache(IMG_CACHE);
     this.gen = 0;
 
@@ -95,6 +99,9 @@ export class Wall {
     this.upgradeTimer = 0;
     this.net = { fast: true, samples: [] };
 
+    // 远景预览：缩小到 ZOVERVIEW 以下时，用一张 canvas 画色块代替逐个块
+    this.overview = null;
+    this.overviewFor = '';
     this.pointers = new Map();
     this._bindInput();
     window.addEventListener('resize', () => this.invalidate());
@@ -265,6 +272,16 @@ export class Wall {
     this.zoomAt(this.stage.clientWidth / 2, this.stage.clientHeight / 2, factor);
   }
 
+  /** 有边界的布局里，缩小时以「整幅画的中心」为锚，这样越缩越能看到全局而不是漂出画外。 */
+  zoomAboutContent(factor) {
+    const b = this.bounds();
+    if (!b) return this.zoomCenter(factor);
+    const C = this.cell;
+    const cx = (b.cols * C) / 2, cy = (b.rows * C) / 2;
+    const sx = cx * this.z + this.tx, sy = cy * this.z + this.ty;
+    this.zoomAt(sx, sy, factor);
+  }
+
   /** 平移一段距离（屏幕 px）。有动效时转成初速度，滑过去。 */
   nudge(dx, dy) {
     this._touch();
@@ -280,6 +297,9 @@ export class Wall {
   invalidate() { this.dirty = true; this.kick(); }
 
   clear() {
+    this.overviewFor = '';
+    for (const g of this.cols.values()) g.el.remove();
+    this.cols.clear();
     if (this._swap) { for (const rec of this._swap.values()) this._release(rec); this._swap = null; }
     for (const rec of this.tiles.values()) this._release(rec);
     this.tiles.clear();
@@ -321,7 +341,7 @@ export class Wall {
     if (!b) return;
     const vw = this.stage.clientWidth, vh = this.stage.clientHeight;
     const W = b.cols * this.cell, H = b.rows * this.cell;
-    // 装得下就居中，装不下就从头看
+    // 装得下就整幅居中；缩放下限允许到 ZMIN（远景会走色块画，不会卡）
     const z = Math.min(1.6, Math.min(vw / W, vh / H) * 0.94);
     this.z = this.zTarget = clamp(z, ZMIN, 2.4);
     this.tx = (vw - W * this.z) / 2;
@@ -416,6 +436,7 @@ export class Wall {
     if (this.dirty) {
       this.dirty = false;
       this.plane.style.transform = `translate3d(${this.tx}px,${this.ty}px,0) scale(${this.z})`;
+      this._applyColumnShift(); // 先算好列偏移，新块建出来就落在对的位置
       this._render();
       this.hooks.onView && this.hooks.onView();
     }
@@ -439,33 +460,43 @@ export class Wall {
 
   _render() {
     if (!this.model.n || !this.layout) { if (this.tiles.size) this.clear(); return; }
+    // 缩得很小的时候不建块：一屏几千个 DOM 会卡，改成一张色块画
+    if (this.z < ZOVERVIEW) return this._renderOverview();
+    this._hideOverview();
     const C = this.cell, G = this.gap, z = this.z;
     const vw = this.stage.clientWidth, vh = this.stage.clientHeight;
     // 加载区：视口外一圈；保留区再大一圈。只有出了保留区的块才回收
     const pad = C * 0.6, keep = C * 2.2;
     const x0 = -this.tx / z, y0 = -this.ty / z;
     const x1 = (vw - this.tx) / z, y1 = (vh - this.ty) / z;
-    if ((x1 - x0) * (y1 - y0) > C * C * 2400) return; // 防御：理论上 ZMIN 下到不了
+    // 防御：万一比例尺算错，宁可不画也不要卡死
+    if ((x1 - x0) * (y1 - y0) > C * C * 2400) return;
     const gen = ++this.gen;
-    const frag = document.createDocumentFragment();
+    const frags = new Map();   // 父节点 → DocumentFragment
 
-    this.layout.query(x0 - pad, y0 - pad, x1 + pad, y1 + pad, C, (key, x, y, w, h, idx, short) => {
+    const qpad = pad + (this._colPad || 0);
+    this.layout.query(x0 - qpad, y0 - qpad, x1 + qpad, y1 + qpad, C, (key, x, y, w, h, idx, short, col) => {
       let rec = this.tiles.get(key);
       if (!rec) {
-        rec = this._create(key, x + G / 2, y + G / 2, Math.max(1, w - G), Math.max(1, h - G), idx, short);
+        rec = this._create(key, x + G / 2, y + G / 2, Math.max(1, w - G), Math.max(1, h - G), idx, short, col);
         this.tiles.set(key, rec);
-        frag.appendChild(rec.el);
+        const host = this._hostFor(col);
+        let f = frags.get(host);
+        if (!f) frags.set(host, (f = document.createDocumentFragment()));
+        f.appendChild(rec.el);
       }
       rec.gen = gen;
     });
-    if (frag.childNodes.length) {
+    for (const [host, f] of frags) {
+      if (!f.childNodes.length) continue;
       // 换清单期间：新块先插在旧块下面，旧块挡着，等新块出图再撤旧块
-      if (this._swap && this.plane.firstChild) this.plane.insertBefore(frag, this.plane.firstChild);
-      else this.plane.appendChild(frag);
+      if (this._swap && host.firstChild) host.insertBefore(f, host.firstChild);
+      else host.appendChild(f);
     }
     if (this._swap) this._settleSwap();
 
-    const kx0 = x0 - keep, ky0 = y0 - keep, kx1 = x1 + keep, ky1 = y1 + keep;
+    const kp = keep + (this._colPad || 0);
+    const kx0 = x0 - kp, ky0 = y0 - kp, kx1 = x1 + kp, ky1 = y1 + kp;
     for (const [key, rec] of this.tiles) {
       if (rec.gen === gen) continue;
       if (rec.x > kx1 || rec.y > ky1 || rec.x + rec.w < kx0 || rec.y + rec.h < ky0) {
@@ -475,7 +506,180 @@ export class Wall {
     }
   }
 
-  _create(key, x, y, w, h, idx, short) {
+  /**
+   * 远景：世界坐标 → 一张固定分辨率的 canvas，每个块只画一个颜色。
+   *
+   * 块的颜色来自「已经解码过的缩略图」的一个像素（没有就取主色），所以不用重新下载任何东西。
+   * 分辨率按世界范围定，缩放变化时重画，但只在真正需要时（比例尺变了）才重画。
+   */
+  _renderOverview() {
+    if (this.tiles.size) this.clear();
+    const C = this.cell;
+    const vw = this.stage.clientWidth, vh = this.stage.clientHeight;
+    const dpr = Math.min(2, window.devicePixelRatio || 1);
+    const b = this.bounds();
+    let x0, y0, x1, y1;
+    if (b) {
+      // 有边界（马赛克）：远景就是把整幅画铺在屏幕里，跟着相机漂没意义
+      x0 = 0; y0 = 0;
+      x1 = b.cols * C; y1 = b.rows * C;
+      // 顺便把相机摆正，这样放大回来时正好从整幅画开始
+      const zc = this.z;
+      this.tx = (vw - (x1 - x0) * zc) / 2;
+      this.ty = (vh - (y1 - y0) * zc) / 2;
+      this.plane.style.transform = `translate3d(${this.tx}px,${this.ty}px,0) scale(${this.z})`;
+    } else {
+      x0 = -this.tx / this.z; y0 = -this.ty / this.z;
+      x1 = (vw - this.tx) / this.z; y1 = (vh - this.ty) / this.z;
+    }
+    if (x1 <= x0 || y1 <= y0) return;
+    const worldW = x1 - x0, worldH = y1 - y0;
+    // canvas 直接就是「这段世界范围在屏幕上的像素」，一个 CSS 像素画一格，不用再缩放
+    const W = Math.max(1, Math.min(4096, Math.round(worldW * this.z * dpr)));
+    const H = Math.max(1, Math.min(4096, Math.round(worldH * this.z * dpr)));
+    const key = [Math.round(x0), Math.round(y0), W, H, b ? 'b' : 'i', this.layoutId, this.seed].join('|');
+    let cv = this.overview;
+    if (!cv) {
+      cv = document.createElement('canvas');
+      cv.className = 'overview';
+      this.plane.appendChild(cv);
+      this.overview = cv;
+    }
+    if (cv.width !== W || cv.height !== H) { cv.width = W; cv.height = H; }
+    // 用世界坐标摆：这段世界范围多大，画布在屏幕上就是多大（plane 还会再缩放）
+    cv.style.width = worldW + 'px';
+    cv.style.height = worldH + 'px';
+    cv.style.left = x0 + 'px';
+    cv.style.top = y0 + 'px';
+    cv.style.display = 'block';
+    if (this.overviewFor === key) return;
+    this.overviewFor = key;
+
+    const ctx = cv.getContext('2d');
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, W, H);
+    const kx = W / worldW, ky = H / worldH;
+    this.layout.query(x0, y0, x1, y1, C, (k, x, y, w, h, idx) => {
+      const sx = (x - x0) * kx, sy = (y - y0) * ky;
+      const sw = Math.max(1, (x + w - x0) * kx - sx);
+      const sh = Math.max(1, (y + h - y0) * ky - sy);
+      ctx.fillStyle = this._colorOf(idx);
+      ctx.fillRect(sx, sy, sw, sh);
+    });
+  }
+
+  /** 一张图的代表色：优先从已解码的缩略图取一个像素，没有就用色板里的主色。 */
+  _colorOf(idx) {
+    const im = this.images[idx];
+    if (!im) return '#111';
+    // 色板优先：它本来就有每张图的主色，远景不需要为取色去下载任何东西
+    const c = this.colors && this.colors[idx];
+    if (c >= 0) return `rgb(${c >> 16 & 255},${c >> 8 & 255},${c & 255})`;
+    // 没有色板（不是马赛克那套数据）时，退回到已解码缩略图的像素
+    const hit = this.cache.best(im, this.opt, 240);
+    if (hit && hit.el) {
+      const sc = this._sampleColor(hit.el);
+      if (sc) return sc;
+    }
+    return '#1a1a1a';
+  }
+
+  _sampleColor(img) {
+    try {
+      if (!img._cv) {
+        const cv = document.createElement('canvas');
+        cv.width = cv.height = 1;
+        const cx = cv.getContext('2d', { willReadFrequently: true });
+        cx.drawImage(img, 0, 0, 1, 1);
+        img._rgb = cx.getImageData(0, 0, 1, 1).data;
+        img._cv = cv;
+      }
+      const d = img._rgb;
+      if (!d) return null;
+      return `rgb(${d[0]},${d[1]},${d[2]})`;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  _hideOverview() {
+    if (this.overview && this.overview.style.display !== 'none') {
+      this.overview.style.display = 'none';
+      this.overviewFor = '';
+    }
+  }
+
+  /**
+   * 一个块该挂在哪个容器下：错列形式是一列一个容器，其他形式直接挂在平面上。
+   * 容器挂在平面上、跟着一起缩放的，所以里面块的 left/top 用的仍是世界坐标。
+   */
+  _hostFor(col) {
+    if (col == null || !this.layout || !this.layout.parallax) return this.plane;
+    let g = this.cols.get(col);
+    if (!g) {
+      const el = document.createElement('div');
+      el.className = 'col';
+      // 先按当前的列偏移摆好，再挂上去，避免第一帧跳一下
+      const extra = this.ty * (this.layout.parallax.speed(col) - 1);
+      el.style.transform = `translate3d(0,${extra}px,0)`;
+      this.plane.appendChild(el);
+      g = { el, speed: this.layout.parallax.speed(col), shift: 0 };
+      this.cols.set(col, g);
+    }
+    return g.el;
+  }
+
+  /**
+   * 错列视差：列容器整体上下挪一点。
+   * 平面已经带着 ty 平移过了，这里补的是「额外那一点」：屏幕位移 = ty × (速度 − 1)，
+   * 换算成平面内的世界单位要除以 z；块的 rectOf 用的也是同一个 g.shift。
+   * 只写几个 transform，不碰任何块。
+   */
+  _applyColumnShift() {
+    if (!this.cols.size) return;
+    let moved = 0;
+    for (const g of this.cols.values()) {
+      const extra = this.ty * (g.speed - 1);          // 平面内（世界）像素
+      g.el.style.transform = `translate3d(0,${extra}px,0)`;
+      // 这一列的图整体挪了位置：内容变了，回收范围按它放大，别把块来回建了拆
+      moved = Math.max(moved, Math.abs(extra));
+    }
+    this._colPad = moved;
+  }
+
+  /** 点开某一块时，把周围的块推开（只给网格形式用，别的形式靠大图自己的飞出）。 */
+  explode(rec) {
+    if (!rec || !this.motion || !this.layout || !this.layout.explodeOnOpen) return;
+    const cx = rec.x + rec.w / 2, cy = rec.y + rec.h / 2;
+    const R = Math.max(rec.w, rec.h) * 2.2;
+    for (const r of this.tiles.values()) {
+      if (r === rec) continue;
+      const dx = r.x + r.w / 2 - cx, dy = r.y + r.h / 2 - cy;
+      const dist = Math.hypot(dx, dy) || 1;
+      const falloff = Math.max(0, 1 - dist / (R * 2.4));
+      const push = 40 + 260 * falloff;
+      const ux = dx / dist, uy = dy / dist;
+      r.el.animate(
+        [
+          { transform: 'none', opacity: 1 },
+          { transform: `translate(${ux * push}px,${uy * push}px) scale(${1 - 0.28 * falloff}) rotate(${ux * 4}deg)`, opacity: 1 - 0.55 * falloff },
+        ],
+        { duration: 460, easing: 'cubic-bezier(.2,.9,.25,1)', delay: Math.min(120, dist / 12), fill: 'forwards' },
+      );
+    }
+  }
+
+  /** 关大图时把推开的块收回来。 */
+  implode() {
+    for (const r of this.tiles.values()) {
+      const anims = r.el.getAnimations();
+      if (!anims.length) continue;
+      for (const a of anims) a.cancel();
+      r.el.animate([{ opacity: 0.45 }, { opacity: 1 }], { duration: 260, easing: 'ease-out' });
+    }
+  }
+
+  _create(key, x, y, w, h, idx, short, col) {
     const im = this.images[idx];
     let el = this.pool.pop();
     if (!el) {
@@ -486,6 +690,9 @@ export class Wall {
       el.appendChild(name);
       el._name = name;
     }
+    el.getAnimations().forEach((a) => a.cancel());
+    el.style.transform = '';
+    el.style.opacity = '';
     el.style.left = x + 'px';
     el.style.top = y + 'px';
     el.style.width = w + 'px';
@@ -500,7 +707,7 @@ export class Wall {
     el.style.setProperty('--d', Math.min(420, Math.hypot(sx, sy) * 0.35) + 'ms');
     el._name.textContent = im.n;
     el.classList.remove('err', 'loaded');
-    const rec = { key, el, im, x, y, w, h, short, img: null, px: 0, want: 0, loader: null, gen: 0 };
+    const rec = { key, el, im, x, y, w, h, short, col, img: null, px: 0, want: 0, loader: null, gen: 0 };
     el._rec = rec;
 
     // 已经解码过就直接放上去，不做入场
@@ -531,6 +738,7 @@ export class Wall {
       rec.loader = null;
       this.active--;
     }
+    rec.el.getAnimations().forEach((a) => a.cancel());
     for (const img of rec.el.querySelectorAll('img')) img.remove();
     rec.img = null;
     rec.el._rec = null;

@@ -16,7 +16,11 @@ const VIEW_KEY = 'wall.view.v1';
 let movingTimer = 0;
 let lastZoomText = '';
 const wall = new Wall($('stage'), $('plane'), {
-  onOpen: (rec) => lightbox.open(rec.im, rec),
+  onOpen: (rec) => {
+    // 网格形式：周围的图先被推开，大图从中间飞出来
+    wall.explode(rec);
+    lightbox.open(rec.im, rec);
+  },
   onInteract: () => {
     hideHint();
     // 加在 <html> 上：样式里只有顶栏和提示条用到它，不会牵连上百个块重新计算样式
@@ -103,6 +107,8 @@ const lightbox = new Lightbox({
   onClose: () => {
     if ($('btnDrift').getAttribute('aria-pressed') === 'true') wall.setDrift(true);
   },
+  // 大图关完：把刚才被推开的块收回来
+  onCloseEnd: () => wall.implode(),
 });
 
 // ------------------------------------------------------------ 文件夹
@@ -359,7 +365,9 @@ function paintSeg(id, val) {
 const LAYOUT_TIPS = {
   collage: '大小块拼贴。横图给宽格、竖图给高格，尽量少裁切。',
   justified: '等高行，按原比例排，几乎不裁切。',
-  grid: '整齐的方格，适合快速扫图。',
+  grid: '整齐的方格，点开一张时周围的图会被推开。',
+  tiltscroll: '斜铺：整面网格斜着铺开，越往右下的行越往右错，拖动时纵深很强。',
+  columns: '错列：一排排竖列，相邻列错开半行，拖动时上下反向错动。',
   mosaic: '照片马赛克：远看是一张大图，放大后每个点都是你的一张图。换一批会换目标图。',
 };
 // ------------------------------------------------------------ 马赛克
@@ -432,7 +440,9 @@ function loadTargetPixels(index) {
 let overlayEl = null;
 /** 马赛克上叠一层半透明目标图：远看更清楚，放大后淡出，免得挡着每张小图。 */
 function updateMosaicOverlay() {
-  const on = S.layout === 'mosaic' && S.mosaicGhost && wall.targetPixels && state.images[wall.mosaicTarget];
+  // 缩得比远景阈值还小的时候不叠目标图：那时画的是色块，叠上去反而糊成一片
+  const on = S.layout === 'mosaic' && S.mosaicGhost && wall.z >= 0.22
+    && wall.targetPixels && state.images[wall.mosaicTarget];
   if (!on) {
     if (overlayEl) { overlayEl.remove(); overlayEl = null; }
     return;
@@ -580,8 +590,8 @@ function maybeAutoWarm() {
 
 // ------------------------------------------------------------ 顶栏按钮
 
-$('btnZoomIn').onclick = () => wall.zoomCenter(1.25);
-$('btnZoomOut').onclick = () => wall.zoomCenter(1 / 1.25);
+$('btnZoomIn').onclick = () => wall.zoomAboutContent(1.25);
+$('btnZoomOut').onclick = () => wall.zoomAboutContent(1 / 1.25);
 $('zoomText').onclick = () => wall.zoomCenter(1 / wall.zTarget);
 
 /** 整面墙换内容：旧墙淡出，换完新墙逐块落定。 */
@@ -649,9 +659,9 @@ window.addEventListener('keydown', (e) => {
   else if (k === 'ArrowRight') wall.nudge(-step, 0);
   else if (k === 'ArrowUp') wall.nudge(0, step);
   else if (k === 'ArrowDown') wall.nudge(0, -step);
-  else if (k === '+' || k === '=') wall.zoomCenter(1.2);
-  else if (k === '-' || k === '_') wall.zoomCenter(1 / 1.2);
-  else if (k === '0') wall.zoomCenter(1 / wall.zTarget);
+  else if (k === '+' || k === '=') wall.zoomAboutContent(1.2);
+  else if (k === '-' || k === '_') wall.zoomAboutContent(1 / 1.2);
+  else if (k === '0') wall.zoomAboutContent(1 / wall.zTarget);
   else if (k === 'f' || k === 'F') $('btnFolder').click();
   else if (k === 's' || k === 'S') $('btnSettings').click();
   else if (k === 'r' || k === 'R') shuffle();

@@ -570,3 +570,13 @@ body.lb-on .toast { opacity: 0 }
 /* 马赛克的块：不留缝，像素感更强 */
 body.layout-mosaic .tile { border-radius: 0 }
 body.layout-mosaic .tile::after { display: none }
+
+/* 错列形式的列容器：只承载一个 transform，块本身不动 */
+.col { position: absolute; left: 0; top: 0; width: 0; height: 0 }
+
+/* 远景色块画：缩小到一定程度时代替逐个块，避免上千个 DOM */
+.overview {
+  position: absolute; left: 0; top: 0;
+  pointer-events: none;
+  image-rendering: auto;
+}
