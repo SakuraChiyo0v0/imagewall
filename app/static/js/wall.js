@@ -183,16 +183,31 @@ export class Wall {
     return this.mosaicTarget;
   }
 
+  /**
+   * 挑一张适合当马赛克的图：优先横图（屏幕是横的，竖图会缩得很小），
+   * 尺寸已知、不是太细长的。找不到就退回固定的第一张。
+   */
+  pickTarget(from = 0) {
+    const n = this.images.length;
+    if (!n) return 0;
+    for (let k = 0; k < n; k++) {
+      const i = (from + k) % n;
+      const a = (this.images[i].a || 0) / 100;
+      if (a >= 1.2 && a <= 2.2) return i;
+    }
+    return from % n;
+  }
+
   _mosaicTable() {
     if (!this.colors || !this.targetPixels) return null;
     const im = this.images[this.mosaicTarget];
     if (!im) return null;
-    // 格子数：目标图会切成 cols×rows 格。格子越多越像原图，但每格越小、越看不清是哪张图；
-    // 同时受「图库要够用」限制（至少每格一张不重样才好看）
+    // 格子数：目标图切成 cols×rows 格。格子越多越像原图，但每格越小；
+    // 上限受图库规模约束（每格一张不重样最好看），长边最多 120 格
     const a = this.targetPixels.w / this.targetPixels.h || 1;
     const n = this.images.length;
-    const budget = Math.max(144, Math.min(2400, n * 6));
-    const long = Math.round(Math.min(160, Math.max(20, Math.sqrt(budget / Math.max(a, 1 / a)))));
+    const budget = Math.max(400, Math.min(9000, n * 3));
+    const long = Math.round(Math.min(120, Math.max(24, Math.sqrt(budget / Math.max(a, 1 / a)))));
     const cols = Math.max(8, Math.round(a >= 1 ? long : long * a));
     const rows = Math.max(8, Math.round(a >= 1 ? long / a : long));
     return buildMosaic(this.model, { ...this.targetPixels, seed: this.seed + 1 }, { cols, rows });

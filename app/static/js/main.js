@@ -389,7 +389,14 @@ async function ensureMosaic() {
       paletteBusy = false;
     }
   }
-  if (!wall.targetPixels) await loadTargetPixels(wall.mosaicTarget);
+  if (!wall.targetPixels) {
+    // 第一次进马赛克：挑一张适合当目标的（横图），而不是清单第一张
+    if (!wall.mosaicPicked) {
+      wall.mosaicPicked = true;
+      wall.mosaicTarget = wall.pickTarget(wall.mosaicTarget);
+    }
+    await loadTargetPixels(wall.mosaicTarget);
+  }
 }
 
 /** 把一张图缩成小图、读出像素，作为马赛克的目标。 */
@@ -596,7 +603,7 @@ function shuffle() {
   b.classList.remove('spin'); void b.offsetWidth; b.classList.add('spin');
   if (S.layout === 'mosaic') {
     // 马赛克里「换一批」= 换一张目标图
-    const idx = wall.nextTarget();
+    const idx = wall.pickTarget(wall.nextTarget());
     transition(() => {
       wall.setSeed(state.seed);
       loadTargetPixels(idx).then(updateMosaicOverlay);
