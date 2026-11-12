@@ -20,6 +20,8 @@ export const api = {
   roots: () => getJSON('api/roots'),
   folders: (path) => getJSON('api/folders?' + q({ path })),
   cacheStats: (refresh) => getJSON('api/cache_stats?' + q({ refresh: refresh ? 1 : '' })),
+  /** 马赛克用的色板：每张图一个 24 位颜色，-1 表示还没算出来。 */
+  palette: (path) => getJSON('api/palette?' + q({ path })),
   warm: (o) => getJSON('api/warm?' + q(o)),
   warmCancel: () => getJSON('api/warm?cancel=1'),
   warmStatus: () => getJSON('api/warm/status'),

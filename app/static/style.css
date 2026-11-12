@@ -337,6 +337,10 @@ body.booting .bar { opacity: 0; transform: translateY(-8px) }
 #plane { transition: opacity .5s }
 body.lb-on #stage { transform: scale(.96) }
 #stage { transition: transform .5s var(--ease) }
+/* 大图打开时，下面整层画布不再接收指针：它自己 z-index 很低，但 pointer-events 还是 auto，
+   边缘空白处的点击会漏到画布上（表现为「点空白关不掉大图，反而把墙拖了一下」） */
+body.lb-open #stage { pointer-events: none }
+
 /* 顶栏、提示条、toast：大图一打开立刻收起（不是淡出，不能压在大图上面） */
 body.lb-open .bar, body.lb-open .hint, body.lb-open .toast {
   opacity: 0 !important; transform: translateY(-10px); pointer-events: none;
@@ -546,3 +550,23 @@ html.calm .tile::before { display: none }
 }
 
 body.lb-on .toast { opacity: 0 }
+
+/* ============================================================ 马赛克 */
+
+/* 叠在整幅画上的半透明目标图：远看更清楚，放大后淡出 */
+.mosaic-ghost {
+  position: absolute; left: 0; top: 0;
+  pointer-events: none;
+  object-fit: cover;
+  filter: saturate(1.05);
+  opacity: 0;
+  transition: opacity .3s;
+  mix-blend-mode: normal;
+  border-radius: var(--r);
+  z-index: 2;
+}
+.mosaic-ghost.on { will-change: opacity }
+
+/* 马赛克的块：不留缝，像素感更强 */
+body.layout-mosaic .tile { border-radius: 0 }
+body.layout-mosaic .tile::after { display: none }

@@ -22,6 +22,9 @@ export const defaults = {
   gap: 4,
   names: false,
   motion: true,
+  // 马赛克：目标图用一张半透明原图垫在下面，远看更清楚
+  mosaicGhost: true,
+  mosaicGhostOpacity: 0.35,
 };
 
 export function load() {

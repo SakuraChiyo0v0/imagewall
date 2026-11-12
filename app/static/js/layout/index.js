@@ -10,8 +10,10 @@
 import { collage } from './collage.js';
 import { justified } from './justified.js';
 import { grid } from './grid.js';
+import { mosaic } from './mosaic.js';
 
-export const LAYOUTS = [collage, justified, grid];
+// 顺序就是设置面板里的顺序。mosaic 是有边界的（一幅画），其他是无限的
+export const LAYOUTS = [collage, justified, grid, mosaic];
 
 export function getLayout(id) {
   return LAYOUTS.find((l) => l.id === id) || LAYOUTS[0];

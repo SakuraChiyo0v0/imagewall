@@ -27,5 +27,6 @@ export function buildModel(images, seed = 0) {
     cls[i] = classify(a);
     if (a) known++;
   }
-  return { n, stride: strideFor(n), cls, aspect, seed, known };
+  // colors：每张图的 24 位主色（-1 = 还不知道），只有马赛克要用
+  return { n, stride: strideFor(n), cls, aspect, seed, known, colors: null, mosaic: null };
 }

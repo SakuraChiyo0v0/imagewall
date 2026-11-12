@@ -10,6 +10,7 @@
 //   3. 换更清晰的图时，新图在旧图上面淡入，旧图等新图完全显示后才移除，中间永远有图。
 
 import { getLayout, buildModel } from './layout/index.js';
+import { buildMosaic } from './layout/mosaic.js';
 import { clamp } from './util.js';
 import { thumbUrl } from './api.js';
 
@@ -70,6 +71,10 @@ export class Wall {
     this.zTarget = 1; this.zAnchor = null;
     this.cell = 280; this.gap = 4; this.seed = 0;
     this.layoutId = 'collage';
+    // 马赛克用：每张图的主色（-1 未知）、目标图（下标），以及算好的整幅格子表
+    this.colors = null;
+    this.mosaicTarget = 0;
+    this.targetPixels = null;
     this.images = []; this.model = buildModel([]); this.layout = null;
     this.opt = { q: 78, fmt: 'jpeg', cap: 640, dpr: 1 };
     this.motion = true;
@@ -147,9 +152,50 @@ export class Wall {
 
   _rebuild() {
     this.model = buildModel(this.images, this.seed);
+    this.model.colors = this.colors;
+    if (this.layoutId === 'mosaic') this.model.mosaic = this._mosaicTable();
     this.layout = getLayout(this.layoutId).create(this.model);
     this.clear();
     this.invalidate();
+    if (this.layoutId === 'mosaic' && !this.layout.bounded) {
+      this.hooks.onMosaicEmpty && this.hooks.onMosaicEmpty();
+    }
+  }
+
+  /** 每张图的主色（马赛克用）。拿到后如果正在马赛克形式，重算一次。 */
+  setColors(colors) {
+    this.colors = colors;
+    if (this.layoutId === 'mosaic') this._rebuild();
+  }
+
+  /** 目标图像素：{ rgba, w, h }（由外部从缩略图画出来）。设置后重算马赛克。 */
+  setTarget(pixels, index) {
+    this.targetPixels = pixels;
+    if (index != null) this.mosaicTarget = index;
+    if (this.layoutId === 'mosaic') this._rebuild();
+  }
+
+  /** 换一张目标图（同一次「换一批」）。 */
+  nextTarget() {
+    const n = this.images.length;
+    if (!n) return 0;
+    this.mosaicTarget = (this.mosaicTarget + 1 + ((this.seed * 7) % Math.max(1, n - 1))) % n;
+    return this.mosaicTarget;
+  }
+
+  _mosaicTable() {
+    if (!this.colors || !this.targetPixels) return null;
+    const im = this.images[this.mosaicTarget];
+    if (!im) return null;
+    // 格子数：目标图会切成 cols×rows 格。格子越多越像原图，但每格越小、越看不清是哪张图；
+    // 同时受「图库要够用」限制（至少每格一张不重样才好看）
+    const a = this.targetPixels.w / this.targetPixels.h || 1;
+    const n = this.images.length;
+    const budget = Math.max(144, Math.min(2400, n * 6));
+    const long = Math.round(Math.min(160, Math.max(20, Math.sqrt(budget / Math.max(a, 1 / a)))));
+    const cols = Math.max(8, Math.round(a >= 1 ? long : long * a));
+    const rows = Math.max(8, Math.round(a >= 1 ? long / a : long));
+    return buildMosaic(this.model, { ...this.targetPixels, seed: this.seed + 1 }, { cols, rows });
   }
 
   setLayout(cell, gap) {
@@ -247,6 +293,27 @@ export class Wall {
       if (d < bd) { bd = d; best = rec; }
     }
     return best;
+  }
+
+  /** 这个形式是不是有边界的（马赛克是一幅画，其他无限）。 */
+  bounds() {
+    return (this.layout && this.layout.bounded) || null;
+  }
+
+  /** 把视图摆到整幅画的左上角附近（切到马赛克时用）。 */
+  fitBounded() {
+    const b = this.bounds();
+    if (!b) return;
+    const vw = this.stage.clientWidth, vh = this.stage.clientHeight;
+    const W = b.cols * this.cell, H = b.rows * this.cell;
+    // 装得下就居中，装不下就从头看
+    const z = Math.min(1.6, Math.min(vw / W, vh / H) * 0.94);
+    this.z = this.zTarget = clamp(z, ZMIN, 2.4);
+    this.tx = (vw - W * this.z) / 2;
+    this.ty = (vh - H * this.z) / 2;
+    this.zAnchor = null;
+    this.vx = this.vy = 0;
+    this.invalidate();
   }
 
   /** 当前视口内的块（大图背景用）。 */

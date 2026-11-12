@@ -91,9 +91,10 @@ test('等高行：每段正好填满、无重叠', () => {
     }
 });
 
-test('所有形式：query 纯、key 唯一、视口铺满', () => {
+test('所有形式：query 纯、key 唯一', () => {
   const m = buildModel(images(600), 0);
   for (const L of LAYOUTS) {
+    if (L.id === 'mosaic') continue; // 有边界，单独测（见 mosaic.test.mjs）
     const a = [], b = [];
     L.create(m).query(-2000, -1500, 2000, 1500, 280, (...r) => a.push(r.join('|')));
     L.create(m).query(-2000, -1500, 2000, 1500, 280, (...r) => b.push(r.join('|')));
@@ -101,6 +102,7 @@ test('所有形式：query 纯、key 唯一、视口铺满', () => {
     const keys = a.map((r) => r.split('|')[0]);
     assert.equal(new Set(keys).size, keys.length, L.id + ' key 重复');
     // 采样点覆盖
+    if (L.id === 'mosaic') continue;
     const rects = a.map((r) => r.split('|').slice(1, 5).map(Number));
     for (let y = -1400; y < 1400; y += 97)
       for (let x = -1900; x < 1900; x += 97)

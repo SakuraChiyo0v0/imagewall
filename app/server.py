@@ -27,7 +27,7 @@ from urllib.parse import parse_qs, quote, urlparse
 
 from PIL import Image, ImageOps, features
 
-VERSION = "1.3.1"
+VERSION = "1.3.2"
 
 
 def _env_int(name: str, default: int) -> int:
@@ -70,6 +70,16 @@ MAX_ASPECT = 2.1
 TILE_BG = (17, 19, 24)
 HAS_WEBP = bool(features.check("webp"))
 LANCZOS = getattr(Image, "Resampling", Image).LANCZOS
+
+
+def _atomic_write(path: str, text: str) -> None:
+    tmp = path + f".{os.getpid()}.tmp"
+    try:
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except OSError:
+        pass
 
 
 def snap(px: int) -> int:
@@ -117,13 +127,18 @@ class Dims:
 
     def __init__(self):
         self.path = os.path.join(STATE_DIR, "dims.json")
+        self.color_path = os.path.join(STATE_DIR, "colors.json")
         self.lock = threading.Lock()
         self.map: dict[str, list] = {}
+        # 主色（马赛克用）：路径 → [r, g, b]。和尺寸分开存，各自可以单独缺
+        self.colors: dict[str, list] = {}
         self.queue: list = []
         self.queued: set = set()
         self.version = 0
+        self.cversion = 0
         self.event = threading.Event()
         self.dirty = 0
+        self.cdirty = 0
 
     @staticmethod
     def key(rel: str, mtime: int, size: int) -> str:
@@ -147,18 +162,30 @@ class Dims:
                 self.map = d
         except (OSError, ValueError):
             self.map = {}
+        try:
+            with open(self.color_path, encoding="utf-8") as f:
+                d = json.load(f)
+            if isinstance(d, dict):
+                self.colors = d
+        except (OSError, ValueError):
+            self.colors = {}
 
     def save(self) -> None:
         with self.lock:
             body = json.dumps(self.map, separators=(",", ":"))
+            cbody = json.dumps(self.colors, separators=(",", ":"))
             self.dirty = 0
-        tmp = self.path + f".{os.getpid()}.tmp"
-        try:
-            with open(tmp, "w", encoding="utf-8") as f:
-                f.write(body)
-            os.replace(tmp, self.path)
-        except OSError:
-            pass
+            self.cdirty = 0
+        _atomic_write(self.path, body)
+        _atomic_write(self.color_path, cbody)
+
+    @staticmethod
+    def c_key(rel: str) -> str:
+        """主色的键：只按路径。文件内容变了颜色会旧一点，但缩放取色本来影响很小，不值得每张都重算。"""
+        return hashlib.sha1(rel.encode()).hexdigest()[:16]
+
+    def color(self, rel: str) -> list | None:
+        return self.colors.get(self.c_key(rel))
 
     def aspect(self, rel: str, mtime: int, size: int) -> int:
         """宽高比 ×100 取整（清单里少几个字节）；不知道就是 0。"""
@@ -168,13 +195,19 @@ class Dims:
         return max(1, round(v[0] * 100 / v[1]))
 
     def want(self, entries: list) -> None:
-        """把还没有尺寸的条目排进后台队列（新请求的排在前面）。"""
+        """把还没算过的条目排进后台队列（新请求的排在前面）。
+
+        缺尺寸、缺颜色都算没算过：老部署里尺寸早就算完了，但颜色是新加，
+        只按尺寸判断的话永远补不上。
+        """
         todo = []
         with self.lock:
             for d, n, t, s in entries:
                 rel = d + "/" + n
                 k = self.key(rel, t, s)
-                if k not in self.map and k not in self.queued:
+                need_dim = k not in self.map
+                need_color = self.c_key(rel) not in self.colors
+                if (need_dim or need_color) and k not in self.queued:
                     self.queued.add(k)
                     todo.append((k, rel))
             if todo:
@@ -194,6 +227,26 @@ class Dims:
                 return [w, h]
         except Exception:  # noqa: BLE001
             return [0, 0]
+
+    def _read_color(self, rel: str) -> list:
+        """主色 [r, g, b]。
+
+        马赛克的格子是方的、用 cover 裁切显示，所以取色也按方形的中心区域取：
+        直接缩整张图的话，长条图的边角会把颜色拉偏；透明区域按格子底色混，
+        否则带透明边的 PNG 会算出偏亮的结果。
+        """
+        try:
+            im = _load(resolve(rel), 96)
+            w, h = im.size
+            if not w or not h:
+                return [0, 0, 0]
+            side = min(w, h)
+            im = im.crop(((w - side) // 2, (h - side) // 2, (w - side) // 2 + side, (h - side) // 2 + side))
+            im = im.resize((1, 1), Image.Resampling.BOX) if hasattr(Image, "Resampling") else im.resize((1, 1), Image.BOX)
+            r, g, b = im.getpixel((0, 0))[:3]
+            return [r, g, b]
+        except Exception:  # noqa: BLE001
+            return [0, 0, 0]
 
     def run(self) -> None:
         self.load()
@@ -215,11 +268,23 @@ class Dims:
                     self.dirty += 1
                     if self.dirty % 200 == 0:
                         self.version += 1
-                if self.dirty >= self.SAVE_EVERY:
+                # 顺便把主色也算出来（马赛克要用），单独存一份，颜色算失败不影响尺寸
+                ck = self.c_key(rel)
+                if ck not in self.colors:
+                    rgb = self._read_color(rel)
+                    with self.lock:
+                        self.colors[ck] = rgb
+                        self.cdirty += 1
+                        if self.cdirty % 100 == 0:
+                            self.cversion += 1
+                if self.dirty >= self.SAVE_EVERY or self.cdirty >= self.SAVE_EVERY:
                     self.save()
-            if self.dirty:
+            if self.dirty or self.cdirty:
                 with self.lock:
-                    self.version += 1
+                    if self.dirty:
+                        self.version += 1
+                    if self.cdirty:
+                        self.cversion += 1
                 self.save()
 
     def pending(self) -> int:
@@ -237,7 +302,8 @@ class Listing:
     尺寸后台补到一定量后（DIMS.version 变了）只重新编码，不重扫目录。
     """
 
-    __slots__ = ("rel", "entries", "ts", "body", "gz", "etag", "_dir_counts", "dv", "missing", "_head")
+    __slots__ = ("rel", "entries", "ts", "body", "gz", "etag", "_dir_counts", "dv", "missing", "_head",
+                 "_pal", "_pal_body", "_pal_gz", "_pal_etag")
 
     def __init__(self, rel: str, entries: list, ts: float):
         self.rel = rel
@@ -262,8 +328,52 @@ class Listing:
         ).encode()
         self.gz = gzip.compress(self.body, 6)
         self._head = None
+        self._pal = None
+        self._pal_body = self._pal_gz = None
+        self._pal_etag = None
         self.etag = '"L' + hashlib.sha1(self.body).hexdigest()[:20] + '"'
         self._dir_counts = None
+
+    def palette(self):
+        """马赛克用的色板：每张图的下标 → 24 位颜色（0xRRGGBB，算不出来的记 -1）。
+
+        单独一个接口而不是塞进清单里：1.2 万张的清单已经 590KB，再带颜色会再大一截，
+        而只有马赛克形式需要颜色。这里用两个数组（下标 + 颜色），gzip 压得也更好。
+        """
+        if self._pal is not None and self._pal.get("cv") == DIMS.cversion:
+            return self._pal
+        codes = []
+        missing = 0
+        lacking = []
+        for k, (d, n, _t, _s) in enumerate(self.entries):
+            rgb = DIMS.color(d + "/" + n)
+            if rgb is None:
+                missing += 1
+                codes.append(-1)
+                lacking.append((d, n))
+            else:
+                r, g, b = rgb
+                codes.append((r << 16) | (g << 8) | b)
+        body = json.dumps(
+            {"path": self.rel, "count": len(codes), "missing": missing, "colors": codes},
+            ensure_ascii=False, separators=(",", ":"),
+        ).encode()
+        if lacking:
+            # 颜色是后台慢慢算的：这次先返回 -1，算好后下次请求就是真的颜色。
+            # 排进后台队列（DIMS.want 只收还没有尺寸的，所以这里先补上 stat）
+            batch = []
+            for d, n in lacking[:5000]:
+                try:
+                    st = os.stat(resolve(d + "/" + n))
+                except OSError:
+                    continue
+                batch.append((d, n, int(st.st_mtime), st.st_size))
+            if batch:
+                DIMS.want(batch)
+        self._pal = {"missing": missing, "body": body, "gz": gzip.compress(body, 6), "cv": DIMS.cversion}
+        self._pal_body, self._pal_gz = body, self._pal["gz"]
+        self._pal_etag = '"P' + hashlib.sha1(body).hexdigest()[:20] + '"'
+        return self._pal
 
     HEAD_N = 400
 
@@ -367,8 +477,7 @@ class Library:
                     sub = [e for e in anc.entries if e[0] == rel or e[0].startswith(pre)]
                     lst = Listing(rel, sub, anc.ts)
                     self._store(lst)
-                    if lst.missing:
-                        DIMS.want(sub)
+                    DIMS.want(sub)
                     return lst
             ev = self.inflight.get(rel)
             if ev is None:
@@ -394,8 +503,8 @@ class Library:
         lst = Listing(rel, entries, time.time())
         with self.lock:
             self._store(lst)
-        if lst.missing:
-            DIMS.want(entries)
+        # 总是排一次：队列会去重，缺颜色的老数据靠这次补上
+        DIMS.want(entries)
         return lst
 
     def _refresh_async(self, rel: str) -> None:
@@ -810,6 +919,17 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, "application/json; charset=utf-8", lst.gz, h)
         return self._send(200, "application/json; charset=utf-8", lst.body, h)
 
+    def send_palette(self, lst: Listing) -> None:
+        pal = lst.palette()
+        etag = lst._pal_etag
+        h = {"Cache-Control": "no-cache", "ETag": etag, "Vary": "Accept-Encoding"}
+        if self._not_modified(etag, {"Cache-Control": "no-cache"}):
+            return
+        if self._gzip_ok():
+            h["Content-Encoding"] = "gzip"
+            return self._send(200, "application/json; charset=utf-8", pal["gz"], h)
+        return self._send(200, "application/json; charset=utf-8", pal["body"], h)
+
     def send_path(self, path: str, ctype: str, cache: str, etag: str, extra: dict | None = None) -> None:
         h = {"Cache-Control": cache, "ETag": etag}
         h.update(extra or {})
@@ -899,6 +1019,11 @@ class Handler(BaseHTTPRequestHandler):
                 if arg("head") == "1" and len(lst.entries) > Listing.HEAD_N:
                     return self.send_listing(lst.head(), total=len(lst.entries))
                 return self.send_listing(lst)
+
+            if path == "/api/palette":
+                rel = rel_of(resolve(arg("path")))
+                lst = LIB.get(rel)
+                return self.send_palette(lst)
 
             if path == "/api/img":
                 return self.serve_img(arg("p"), qs)

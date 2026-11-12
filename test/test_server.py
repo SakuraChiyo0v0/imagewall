@@ -260,6 +260,52 @@ class ServerTest(unittest.TestCase):
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
 
+    def test_palette(self):
+        """色板：按清单顺序给每张图一个 24 位颜色；还没算出来的记 -1，之后会补上。"""
+        d = self.js("/api/images?path=" + quote("图片"))
+        pal = self.js("/api/palette?path=" + quote("图片"))
+        self.assertEqual(pal["count"], d["count"])
+        self.assertEqual(len(pal["colors"]), d["count"])
+        for _ in range(150):
+            if self.js("/api/health")["dimsPending"] == 0:
+                break
+            time.sleep(0.1)
+        pal = self.js("/api/palette?path=" + quote("图片"))
+        self.assertEqual(pal["missing"], 0, pal["missing"])
+        for c in pal["colors"]:
+            self.assertGreaterEqual(c, 0)
+            self.assertLessEqual(c, 0xFFFFFF)
+        # 颜色要和「按方形中心区域取平均」对得上。
+        # 色板按扫描顺序（mtime 倒序），和清单里的 files 是同一顺序，但同一 mtime 时
+        # 排序可能不同，所以直接按色板回归，先用服务端自己算的值核对一张
+        from PIL import Image, ImageOps
+        di, n = d["files"][0][0], d["files"][0][1]
+        with Image.open(os.path.join(self.data, d["dirs"][di], n)) as im:
+            im = ImageOps.exif_transpose(im)
+            # 带透明的图：服务端按格子底色混，测试也要一致
+            if im.mode in ("RGBA", "LA", "PA") or (im.mode == "P" and "transparency" in im.info):
+                im = im.convert("RGBA")
+                bg = Image.new("RGB", im.size, (17, 19, 24))
+                bg.paste(im, mask=im.getchannel("A"))
+                im = bg
+            else:
+                im = im.convert("RGB")
+            w, h = im.size
+            side = min(w, h)
+            box = im.crop(((w - side) // 2, (h - side) // 2, (w - side) // 2 + side, (h - side) // 2 + side))
+            r, g, bl = box.resize((1, 1), Image.BOX).getpixel((0, 0))
+        # 找这张图在色板里的位置（按路径匹配，别假设两边顺序完全一致）
+        want_path = d["dirs"][di] + "/" + n
+        idx = next(i for i, f in enumerate(d["files"]) if d["dirs"][f[0]] + "/" + f[1] == want_path)
+        self.assertEqual(pal["colors"][idx], (r << 16) | (g << 8) | bl)
+
+    def test_palette_etag(self):
+        code, h, _ = self.get("/api/palette?path=" + quote("图片"), {"Accept-Encoding": "gzip"})
+        self.assertEqual(code, 200)
+        self.assertEqual(h.get("Content-Encoding"), "gzip")
+        code, _h, _ = self.get("/api/palette?path=" + quote("图片"), {"If-None-Match": h["ETag"]})
+        self.assertEqual(code, 304)
+
     def test_404_and_400(self):
         self.assertEqual(self.get("/api/nope")[0], 404)
         self.assertEqual(self.get("/api/img")[0], 400)
