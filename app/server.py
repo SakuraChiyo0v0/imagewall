@@ -248,6 +248,29 @@ class Dims:
         except Exception:  # noqa: BLE001
             return [0, 0, 0]
 
+    def backfill_colors(self) -> int:
+        """把「尺寸已有、颜色还没算」的条目排进队列。返回排了多少。
+
+        颜色是 v1.3.2 新加的，老部署里尺寸早算完了，不主动扫一遍永远补不上。
+        只用已缓存的清单（里面有 mtime/大小），不去 stat。
+        """
+        todo = []
+        with self.lock:
+            for lst in LIB.cache.values():
+                for d, n, t, sz in lst.entries:
+                    rel = d + "/" + n
+                    ck = self.c_key(rel)
+                    if ck not in self.colors and ck not in self.queued:
+                        self.queued.add(ck)
+                        todo.append((self.key(rel, t, sz), rel))
+                if len(todo) >= 4000:
+                    break
+            if todo:
+                self.queue.extend(todo)
+        if todo:
+            self.event.set()
+        return len(todo)
+
     def run(self) -> None:
         self.load()
         while True:
@@ -286,6 +309,9 @@ class Dims:
                     if self.cdirty:
                         self.cversion += 1
                 self.save()
+            # 队列跑空了：看看还有没有缺颜色的（老数据），有就接着干
+            if not self.queue and self.backfill_colors():
+                continue
 
     def pending(self) -> int:
         with self.lock:
@@ -350,7 +376,9 @@ class Listing:
             if rgb is None:
                 missing += 1
                 codes.append(-1)
-                lacking.append((d, n))
+                # 清单里本来就有 mtime / 大小，不用再去 stat（NAS 上 stat 一次几毫秒，
+                # 上万张就卡成 120 秒超时）
+                lacking.append((d, n, _t, _s))
             else:
                 r, g, b = rgb
                 codes.append((r << 16) | (g << 8) | b)
@@ -359,17 +387,8 @@ class Listing:
             ensure_ascii=False, separators=(",", ":"),
         ).encode()
         if lacking:
-            # 颜色是后台慢慢算的：这次先返回 -1，算好后下次请求就是真的颜色。
-            # 排进后台队列（DIMS.want 只收还没有尺寸的，所以这里先补上 stat）
-            batch = []
-            for d, n in lacking[:5000]:
-                try:
-                    st = os.stat(resolve(d + "/" + n))
-                except OSError:
-                    continue
-                batch.append((d, n, int(st.st_mtime), st.st_size))
-            if batch:
-                DIMS.want(batch)
+            # 颜色是后台慢慢算的：这次先返回 -1，算好后下次请求就是真的颜色
+            DIMS.want(lacking[:5000])
         self._pal = {"missing": missing, "body": body, "gz": gzip.compress(body, 6), "cv": DIMS.cversion}
         self._pal_body, self._pal_gz = body, self._pal["gz"]
         self._pal_etag = '"P' + hashlib.sha1(body).hexdigest()[:20] + '"'
