@@ -27,7 +27,7 @@ from urllib.parse import parse_qs, quote, urlparse
 
 from PIL import Image, ImageOps, features
 
-VERSION = "1.0.0"
+VERSION = "1.1.0"
 
 
 def _env_int(name: str, default: int) -> int:
@@ -103,27 +103,148 @@ def is_root(rel: str) -> bool:
 
 # ---------------------------------------------------------------- 目录清单
 
+class Dims:
+    """图片宽高：后台只读文件头（不解码像素），持久化到缓存目录的 dims.json。
+
+    扫描时不读尺寸（1.2 万张会从 1 秒变成几十秒）；清单先发出去，尺寸在后台慢慢补，
+    补完的下一次打开就能按横竖图分配格子形状。读不出来的记 (0, 0)，不再重试。
+    """
+
+    SAVE_EVERY = 500
+
+    def __init__(self):
+        self.path = os.path.join(CACHE_DIR, "dims.json")
+        self.lock = threading.Lock()
+        self.map: dict[str, list] = {}
+        self.queue: list = []
+        self.queued: set = set()
+        self.version = 0
+        self.event = threading.Event()
+        self.dirty = 0
+
+    @staticmethod
+    def key(rel: str, mtime: int, size: int) -> str:
+        return hashlib.sha1(f"{rel}|{mtime}|{size}".encode()).hexdigest()[:16]
+
+    def load(self) -> None:
+        try:
+            with open(self.path, encoding="utf-8") as f:
+                d = json.load(f)
+            if isinstance(d, dict):
+                self.map = d
+        except (OSError, ValueError):
+            self.map = {}
+
+    def save(self) -> None:
+        with self.lock:
+            body = json.dumps(self.map, separators=(",", ":"))
+            self.dirty = 0
+        tmp = self.path + f".{os.getpid()}.tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(body)
+            os.replace(tmp, self.path)
+        except OSError:
+            pass
+
+    def aspect(self, rel: str, mtime: int, size: int) -> int:
+        """宽高比 ×100 取整（清单里少几个字节）；不知道就是 0。"""
+        v = self.map.get(self.key(rel, mtime, size))
+        if not v or not v[1]:
+            return 0
+        return max(1, round(v[0] * 100 / v[1]))
+
+    def want(self, entries: list) -> None:
+        """把还没有尺寸的条目排进后台队列（新请求的排在前面）。"""
+        todo = []
+        with self.lock:
+            for d, n, t, s in entries:
+                rel = d + "/" + n
+                k = self.key(rel, t, s)
+                if k not in self.map and k not in self.queued:
+                    self.queued.add(k)
+                    todo.append((k, rel))
+            if todo:
+                self.queue[:0] = todo
+        if todo:
+            self.event.set()
+
+    def _read(self, rel: str) -> list:
+        try:
+            with Image.open(resolve(rel)) as im:
+                w, h = im.size
+                try:
+                    if im.getexif().get(0x0112) in (5, 6, 7, 8):  # EXIF 旋转 90°
+                        w, h = h, w
+                except Exception:  # noqa: BLE001
+                    pass
+                return [w, h]
+        except Exception:  # noqa: BLE001
+            return [0, 0]
+
+    def run(self) -> None:
+        self.load()
+        while True:
+            self.event.wait(30)
+            self.event.clear()
+            while True:
+                with self.lock:
+                    if not self.queue:
+                        break
+                    k, rel = self.queue.pop(0)
+                # 前台在等缩略图就让路
+                while GEN.interactive > 0:
+                    time.sleep(0.05)
+                wh = self._read(rel)
+                with self.lock:
+                    self.map[k] = wh
+                    self.queued.discard(k)
+                    self.dirty += 1
+                    if self.dirty % 200 == 0:
+                        self.version += 1
+                if self.dirty >= self.SAVE_EVERY:
+                    self.save()
+            if self.dirty:
+                with self.lock:
+                    self.version += 1
+                self.save()
+
+    def pending(self) -> int:
+        with self.lock:
+            return len(self.queue)
+
+
+DIMS = Dims()
+
+
 class Listing:
     """一次扫描的结果。entries 按 mtime 倒序：(目录相对路径, 文件名, mtime, 字节数)。
 
     JSON 在构建时编码一次、gzip 一次，之后每个请求直接发字节，不再重复 dumps。
+    尺寸后台补到一定量后（DIMS.version 变了）只重新编码，不重扫目录。
     """
 
-    __slots__ = ("rel", "entries", "ts", "body", "gz", "etag", "_dir_counts")
+    __slots__ = ("rel", "entries", "ts", "body", "gz", "etag", "_dir_counts", "dv", "missing")
 
     def __init__(self, rel: str, entries: list, ts: float):
         self.rel = rel
         self.entries = entries
         self.ts = ts
+        self.dv = DIMS.version
         dirs, idx, files = [], {}, []
+        missing = 0
         for d, n, t, s in entries:
             i = idx.get(d)
             if i is None:
                 i = idx[d] = len(dirs)
                 dirs.append(d)
-            files.append([i, n, t, s])
+            a = DIMS.aspect(d + "/" + n, t, s)
+            if not a and DIMS.key(d + "/" + n, t, s) not in DIMS.map:
+                missing += 1
+            files.append([i, n, t, s, a])
+        self.missing = missing
         self.body = json.dumps(
-            {"path": rel, "count": len(files), "dirs": dirs, "files": files},
+            {"path": rel, "count": len(files), "dims": {"missing": missing}, "dirs": dirs, "files": files},
             ensure_ascii=False, separators=(",", ":"),
         ).encode()
         self.gz = gzip.compress(self.body, 6)
@@ -212,6 +333,10 @@ class Library:
                 if hit:
                     if now - hit.ts > SCAN_TTL:
                         self._refresh_async(rel)
+                    elif hit.missing and hit.dv != DIMS.version:
+                        # 后台补了一批尺寸：只重新编码，不重扫目录
+                        hit = Listing(rel, hit.entries, hit.ts)
+                        self._store(hit)
                     return hit
                 anc = self._covering(rel)
                 if anc and now - anc.ts <= SCAN_TTL:
@@ -219,6 +344,8 @@ class Library:
                     sub = [e for e in anc.entries if e[0] == rel or e[0].startswith(pre)]
                     lst = Listing(rel, sub, anc.ts)
                     self._store(lst)
+                    if lst.missing:
+                        DIMS.want(sub)
                     return lst
             ev = self.inflight.get(rel)
             if ev is None:
@@ -244,6 +371,8 @@ class Library:
         lst = Listing(rel, entries, time.time())
         with self.lock:
             self._store(lst)
+        if lst.missing:
+            DIMS.want(entries)
         return lst
 
     def _refresh_async(self, rel: str) -> None:
@@ -728,7 +857,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_static(full)
 
             if path == "/api/health":
-                return self.send_json({"ok": True, "version": VERSION})
+                return self.send_json({"ok": True, "version": VERSION, "dimsPending": DIMS.pending()})
 
             if path == "/api/roots":
                 return self.send_json({
@@ -822,6 +951,7 @@ def main() -> None:
     for r, real in zip(ROOTS, ROOTS_REAL):
         print(f"[wall] root {r} -> {real} exists={os.path.isdir(real)}", flush=True)
     threading.Thread(target=JANITOR.run, daemon=True).start()
+    threading.Thread(target=DIMS.run, daemon=True).start()
     srv = Server((a.host, a.port), Handler)
     print(f"[wall] v{VERSION} on {a.host}:{a.port} workers={WORKERS} webp={HAS_WEBP} "
           f"cache_max={CACHE_MAX // 1048576}MB", flush=True)

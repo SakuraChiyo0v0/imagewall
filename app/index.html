@@ -71,6 +71,11 @@
   </div>
   <div class="sheet-body">
     <div class="field">
+      <label>形式</label>
+      <div class="seg" id="segLayout"></div>
+      <p class="tip" id="layoutTip"></p>
+    </div>
+    <div class="field">
       <label>清晰度</label>
       <div class="seg" id="segDetail">
         <button data-v="low">省流</button><button data-v="mid">标准</button><button data-v="high">高清</button><button data-v="max">极致</button>
@@ -122,15 +127,26 @@
 
 <!-- 大图 -->
 <div class="lightbox" id="lightbox" hidden>
-  <div class="lb-stage" id="lbStage"><img id="lbImg" alt="" draggable="false"></div>
+  <div class="lb-amb" aria-hidden="true"><i id="lbAmbA"></i><i id="lbAmbB"></i></div>
+  <div class="lb-stage" id="lbStage"><div class="lb-track" id="lbTrack"></div></div>
   <div class="lb-spin"></div>
   <div class="lb-err" id="lbErr" hidden>这张图读不出来</div>
   <button class="lb-nav prev" id="lbPrev" title="上一张（←）"><svg class="i" viewBox="0 0 24 24"><path d="m15 5-7 7 7 7"/></svg></button>
   <button class="lb-nav next" id="lbNext" title="下一张（→）"><svg class="i" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></svg></button>
+  <div class="lb-top">
+    <span class="mono lb-count" id="lbCount"></span>
+    <div class="spacer"></div>
+    <button class="ib" id="lbPlay" title="播放（P）" aria-pressed="false">
+      <svg class="i play" viewBox="0 0 24 24"><path d="M8 5.5v13l10-6.5z"/></svg>
+      <svg class="i pause" viewBox="0 0 24 24"><path d="M8 5v14M16 5v14"/></svg>
+    </button>
+    <a id="lbRaw" class="ib" href="#" target="_blank" rel="noopener" title="原图"><svg class="i" viewBox="0 0 24 24"><path d="M14 4h6v6M20 4l-8 8M18 14v4a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4"/></svg></a>
+    <button class="ib x" data-close title="关闭（Esc）"><svg class="i" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+  </div>
+  <div class="lb-prog"><i id="lbProg"></i></div>
   <div class="lb-bar">
     <div class="lb-meta"><b id="lbName"></b><div id="lbInfo" class="lb-info"></div></div>
-    <a id="lbRaw" class="ghost" href="#" target="_blank" rel="noopener">原图</a>
-    <button class="ib x" data-close title="关闭（Esc）"><svg class="i" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+    <div class="lb-strip" id="lbStrip"><div class="lb-strip-in" id="lbStripIn"></div></div>
   </div>
 </div>
 

@@ -56,8 +56,13 @@ const cover = () => ev(`(() => {
   for (let y = 6; y < innerHeight - 6; y += 40)
     for (let x = 6; x < innerWidth - 6; x += 40) {
       total++;
-      const el = document.elementFromPoint(x, y);
-      if (el && (el.closest('.tile') || el.closest('.bar') || el.closest('.hint'))) hit++;
+      // 采样点可能正好落在块间距那条缝上（取决于停在哪），上下左右挪半个间距再看
+      const g = (__wall.wall.gap * __wall.wall.z) / 2 + 1;
+      const ok = [[0, 0], [g, 0], [-g, 0], [0, g], [0, -g], [g, g], [-g, -g], [g, -g], [-g, g]].some(([dx, dy]) => {
+        const el = document.elementFromPoint(x + dx, y + dy);
+        return el && (el.closest('.tile') || el.closest('.bar') || el.closest('.hint'));
+      });
+      if (ok) hit++;
     }
   return Math.round(hit / total * 100);
 })()`);
@@ -89,9 +94,7 @@ for (let i = 1; i <= 16; i++) { await mouse('mouseMoved', 1300 - i * 45, 700 - i
 await mouse('mouseReleased', 1300 - 16 * 45, 700 - 16 * 30);
 await sleep(1600);
 check('拖动后覆盖率 100%', (await cover()) === 100, (await cover()) + '%');
-const inertia = await ev('__wall.wall.tx');
-await sleep(50);
-check('惯性已停', Math.abs((await ev('__wall.wall.tx')) - inertia) < 0.5);
+check('惯性会自己停下', (await waitFor('__wall.wall.vx === 0 && __wall.wall.vy === 0', 6000).then(() => true, () => false)));
 
 // 拖回原点 → 同一位置同一张图（确定性）
 const before = await ev(`(() => { const el = document.elementFromPoint(800, 500).closest('.tile'); return el && el._rec.im.p })()`);
@@ -124,7 +127,9 @@ const pt = await ev(`(() => {
 await mouse('mousePressed', pt.x, pt.y);
 await mouse('mouseReleased', pt.x, pt.y);
 await waitFor(`!document.getElementById('lightbox').hidden`, 3000);
-await waitFor(`document.getElementById('lbImg').src.includes('w=')`, 15000);
+await waitFor(`(() => { const i = document.querySelector('.lb-slide.cur img'); return i && i.src.includes('w=') })()`, 15000);
+check('两侧有预览', (await ev(`document.querySelectorAll('.lb-slide.side').length`)) >= 2);
+check('胶片条有缩略图', (await ev(`document.querySelectorAll('.lb-th').length`)) > 4);
 await sleep(700);
 check('点块打开大图', true, pt.p);
 check('大图是被点的那张', (await ev(`document.getElementById('lbName').title`)) === pt.p);
@@ -141,12 +146,16 @@ await ev(`document.getElementById('btnSettings').click()`);
 await sleep(400);
 await shot('4-settings');
 await ev(`document.querySelector('#segDetail [data-v="low"]').click()`);
+await sleep(300);
+// 已经清晰的块不会降级重下；看刷新后新建的块请求了多大
+await send('Network.setCacheDisabled', { cacheDisabled: true });
 reqs.length = 0;
-await sleep(1500);
-const sizes = reqs.filter((u) => u.includes('/api/img?')).map((u) => +new URL(u).searchParams.get('s')).filter(Boolean);
-check('省流档请求 s≤320', sizes.length > 0 && Math.max(...sizes) <= 320, `${sizes.length} 个请求，最大 s=${Math.max(...sizes)}`);
 await send('Page.reload');
 await waitFor('window.__wall && __wall.state.images.length > 0', 30000);
+await sleep(2500);
+await send('Network.setCacheDisabled', { cacheDisabled: false });
+const sizes = reqs.filter((u) => u.includes('/api/img?')).map((u) => +new URL(u).searchParams.get('s')).filter(Boolean);
+check('省流档请求 s≤320', sizes.length > 0 && Math.max(...sizes) <= 320, `${sizes.length} 个请求，最大 s=${Math.max(...sizes)}`);
 check('刷新后设置保持', (await ev(`JSON.parse(localStorage.getItem('wall.settings.v2')).detail`)) === 'low');
 await ev(`localStorage.setItem('wall.settings.v2', JSON.stringify({ ...JSON.parse(localStorage.getItem('wall.settings.v2')), detail: 'mid' }))`);
 

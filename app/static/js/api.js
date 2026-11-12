@@ -33,11 +33,11 @@ export const api = {
     const dirs = d.dirs || [];
     const images = new Array(d.files.length);
     for (let i = 0; i < d.files.length; i++) {
-      const [di, n, t, s] = d.files[i];
+      const [di, n, t, s, a] = d.files[i];
       const dir = dirs[di];
-      images[i] = { p: dir ? dir + '/' + n : n, n, d: dir, t, s, i };
+      images[i] = { p: dir ? dir + '/' + n : n, n, d: dir, t, s, a: a || 0, i };
     }
-    return { path: d.path, images };
+    return { path: d.path, images, missing: (d.dims && d.dims.missing) || 0 };
   },
 };
 

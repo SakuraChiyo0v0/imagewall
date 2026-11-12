@@ -71,7 +71,7 @@ class ServerTest(unittest.TestCase):
 
     def images(self, rel):
         d = self.js("/api/images?path=" + quote(rel))
-        paths = [(d["dirs"][i] + "/" + n) for i, n, _t, _s in d["files"]]
+        paths = [(d["dirs"][i] + "/" + n) for i, n, _t, _s, _a in d["files"]]
         return [p for p in paths if "坏图" not in p], d
 
     # ------------------------------------------------------------
@@ -79,7 +79,7 @@ class ServerTest(unittest.TestCase):
     def test_roots_and_static(self):
         d = self.js("/api/roots")
         self.assertEqual([r["path"] for r in d["roots"]], ["图片", "漫画", "素材"])
-        for p in ("/", "/static/style.css", "/static/js/main.js", "/static/js/layout.js"):
+        for p in ("/", "/static/style.css", "/static/js/main.js", "/static/js/layout/collage.js"):
             code, h, _ = self.get(p)
             self.assertEqual(code, 200, p)
         _c, h, _ = self.get("/static/js/main.js")
@@ -212,6 +212,22 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(st["failed"], 0)
         stats = self.js("/api/cache_stats?refresh=1")
         self.assertIn("bytes", stats)
+
+    def test_dims_backfilled(self):
+        """尺寸后台补：第一次清单里 aspect 可能是 0，等补完后的清单要带上真实宽高比。"""
+        from PIL import Image
+        self.js("/api/images?path=" + quote("素材"))
+        for _ in range(100):
+            if self.js("/api/health")["dimsPending"] == 0:
+                break
+            time.sleep(0.1)
+        time.sleep(0.3)
+        d = self.js("/api/images?path=" + quote("素材"))
+        self.assertEqual(d["dims"]["missing"], 0)
+        for di, n, _t, _s, a in d["files"]:
+            with Image.open(os.path.join(self.data, d["dirs"][di], n)) as im:
+                self.assertEqual(a, round(im.size[0] * 100 / im.size[1]), n)
+        self.assertTrue(os.path.exists(os.path.join(self.cache, "dims.json")))
 
     def test_404_and_400(self):
         self.assertEqual(self.get("/api/nope")[0], 404)

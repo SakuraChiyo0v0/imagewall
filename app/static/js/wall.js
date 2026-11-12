@@ -1,9 +1,15 @@
 // 无限画布：视口裁剪、块复用、按距离排队加载、惯性 / 平滑缩放 / 漫游。
 //
-// 坐标：屏幕 = 世界 × z + (tx, ty)。布局与选图全部来自 layout.js 的纯函数，
+// 坐标：屏幕 = 世界 × z + (tx, ty)。块的位置与选图全部来自 layout/ 下的纯函数，
 // 这里只负责「现在屏幕上该有哪些块」和「先加载哪张」。
+//
+// 防闪烁的三条规矩：
+//   1. 已经解码过的缩略图放进 LRU（按 图片+尺寸 记）。块被回收后再出现，直接拿回已解码的 <img>，
+//      不重新下载、不做入场动画。
+//   2. 块只在「出了保留区」才回收，保留区比加载区大一圈，来回小幅拖动不会反复回收。
+//   3. 换更清晰的图时，新图在旧图上面淡入，旧图等新图完全显示后才移除，中间永远有图。
 
-import { BS, memoTiling, pickIndex, strideFor, hash2 } from './layout.js';
+import { getLayout, buildModel } from './layout/index.js';
 import { clamp } from './util.js';
 import { thumbUrl } from './api.js';
 
@@ -13,10 +19,46 @@ export const ZMAX = 2.4;
 const BUCKETS = [160, 240, 320, 480, 640, 800, 1200, 1600, 2400];
 const snap = (px) => BUCKETS.find((b) => b >= px) || BUCKETS[BUCKETS.length - 1];
 
-const MAX_LOADS = 8;        // 同时在途的缩略图请求
 const POOL_MAX = 240;       // 复用的块元素上限
+const IMG_CACHE = 420;      // 已解码缩略图 LRU 条数
 const FRICTION_MS = 320;    // 惯性衰减时间常数（越大滑得越远）
 const ZOOM_SMOOTH_MS = 70;  // 平滑缩放的追随时间常数
+
+/** 已解码缩略图的 LRU。key = 图片路径 + 尺寸 + 规格。 */
+class ImgCache {
+  constructor(max) { this.max = max; this.map = new Map(); }
+  key(im, px, opt) { return im.p + '|' + im.t + '|' + px + '|' + opt.q + opt.fmt; }
+  /**
+   * 取这张图已解码的一档：优先 ≤ want 里最大的；没有就取 > want 里最小的
+   * （缩小后显示比需要更清晰的图完全没问题，总比黑一下再重新下载强）。
+   */
+  best(im, opt, want) {
+    let hit = null;
+    for (const px of BUCKETS) {
+      const el = this.map.get(this.key(im, px, opt));
+      if (!el) continue;
+      if (px <= want) hit = { el, px };
+      else { if (!hit) hit = { el, px }; break; }
+    }
+    if (hit) {
+      const k = this.key(im, hit.px, opt);
+      this.map.delete(k);
+      this.map.set(k, hit.el);
+    }
+    return hit;
+  }
+  put(im, px, opt, el) {
+    const k = this.key(im, px, opt);
+    this.map.delete(k);
+    this.map.set(k, el);
+    while (this.map.size > this.max) {
+      const [ok, old] = this.map.entries().next().value;
+      this.map.delete(ok);
+      if (!old.isConnected) old.src = '';
+    }
+  }
+  clear() { this.map.clear(); }
+}
 
 export class Wall {
   constructor(stage, plane, hooks = {}) {
@@ -27,23 +69,26 @@ export class Wall {
     this.tx = 0; this.ty = 0; this.z = 1;
     this.zTarget = 1; this.zAnchor = null;
     this.cell = 280; this.gap = 4; this.seed = 0;
-    this.images = []; this.stride = 1;
+    this.layoutId = 'collage';
+    this.images = []; this.model = buildModel([]); this.layout = null;
     this.opt = { q: 78, fmt: 'jpeg', cap: 640, dpr: 1 };
     this.motion = true;
+    this.maxLoads = 8;
 
-    this.tiling = memoTiling();
     this.tiles = new Map();   // key → rec
     this.pool = [];
+    this.cache = new ImgCache(IMG_CACHE);
     this.gen = 0;
 
     this.queue = new Set();   // 等待加载的 rec
     this.active = 0;
 
     this.vx = 0; this.vy = 0; // 惯性速度（屏幕 px / ms）
-    this.drift = false; this.driftPause = 0;
+    this.drift = false;
     this.lastInteract = 0;
     this.raf = 0; this.lastT = 0; this.dirty = true;
     this.upgradeTimer = 0;
+    this.net = { fast: true, samples: [] };
 
     this.pointers = new Map();
     this._bindInput();
@@ -54,14 +99,24 @@ export class Wall {
 
   setImages(images, seed = 0) {
     this.images = images;
-    this.stride = strideFor(images.length);
     this.seed = seed;
-    this.clear();
-    this.invalidate();
+    this._rebuild();
   }
 
   setSeed(seed) {
     this.seed = seed;
+    this._rebuild();
+  }
+
+  setLayoutType(id) {
+    if (id === this.layoutId) return;
+    this.layoutId = id;
+    this._rebuild();
+  }
+
+  _rebuild() {
+    this.model = buildModel(this.images, this.seed);
+    this.layout = getLayout(this.layoutId).create(this.model);
     this.clear();
     this.invalidate();
   }
@@ -80,16 +135,17 @@ export class Wall {
   }
 
   setThumbOptions(o) {
-    const changed = o.q !== this.opt.q || o.fmt !== this.opt.fmt || o.cap !== this.opt.cap;
+    const changed = (o.q !== undefined && o.q !== this.opt.q) || (o.fmt !== undefined && o.fmt !== this.opt.fmt);
+    const capChanged = o.cap !== undefined && o.cap !== this.opt.cap;
     Object.assign(this.opt, o);
-    if (changed) { this.clear(); this.invalidate(); }
+    if (changed) { this.clear(); this.cache.clear(); this.invalidate(); }
+    else if (capChanged || o.dpr !== undefined) this._scheduleUpgrade();
   }
 
   setMotion(on) { this.motion = on; }
 
   setDrift(on) {
     this.drift = on;
-    this.driftPause = 0;
     this.kick();
   }
 
@@ -103,7 +159,7 @@ export class Wall {
     this.invalidate();
   }
 
-  /** 以屏幕点 (px, py) 为锚缩放。smooth=true 时平滑追随（按钮 / 键盘 / 鼠标滚轮）。 */
+  /** 以屏幕点 (px, py) 为锚缩放。smooth=true 时平滑追随。 */
   zoomAt(px, py, factor, smooth = true) {
     const target = clamp((smooth ? this.zTarget : this.z) * factor, ZMIN, ZMAX);
     this.zAnchor = { sx: px, sy: py, wx: (px - this.tx) / this.z, wy: (py - this.ty) / this.z };
@@ -121,7 +177,6 @@ export class Wall {
   nudge(dx, dy) {
     this._touch();
     if (this.motion) {
-      // 惯性滑行总距离 = v × τ
       this.vx += dx / FRICTION_MS;
       this.vy += dy / FRICTION_MS;
     } else {
@@ -162,10 +217,29 @@ export class Wall {
     return best;
   }
 
+  /** 当前视口内的块（大图背景用）。 */
+  visibleRecs() {
+    const vw = this.stage.clientWidth, vh = this.stage.clientHeight, out = [];
+    for (const r of this.tiles.values()) {
+      const sx = r.x * this.z + this.tx, sy = r.y * this.z + this.ty;
+      if (sx + r.w * this.z > 0 && sy + r.h * this.z > 0 && sx < vw && sy < vh) out.push(r);
+    }
+    return out;
+  }
+
+  /** 已解码的缩略图 URL（大图打开时先用它，不用等网络）。 */
+  cachedThumb(im) {
+    const hit = this.cache.best(im, this.opt, 99999);
+    return hit ? hit.el.src : '';
+  }
+
   stats() {
     let loaded = 0;
     for (const r of this.tiles.values()) if (r.img) loaded++;
-    return { tiles: this.tiles.size, loaded, queued: this.queue.size, active: this.active, pool: this.pool.length };
+    return {
+      tiles: this.tiles.size, loaded, queued: this.queue.size, active: this.active,
+      pool: this.pool.length, cached: this.cache.map.size, fast: this.net.fast, maxLoads: this.maxLoads,
+    };
   }
 
   // ------------------------------------------------------------ 帧循环
@@ -183,7 +257,6 @@ export class Wall {
     this.lastT = t;
     let busy = false;
 
-    // 平滑缩放
     if (this.zAnchor && Math.abs(this.zTarget - this.z) > 1e-4) {
       const k = 1 - Math.exp(-dt / ZOOM_SMOOTH_MS);
       this._applyZoom(this.z + (this.zTarget - this.z) * k);
@@ -194,7 +267,6 @@ export class Wall {
       this._scheduleUpgrade();
     }
 
-    // 惯性
     if (this.vx || this.vy) {
       this.tx += this.vx * dt;
       this.ty += this.vy * dt;
@@ -241,58 +313,45 @@ export class Wall {
     this.dirty = true;
   }
 
-  _touch() {
-    this.lastInteract = performance.now();
-  }
+  _touch() { this.lastInteract = performance.now(); }
 
   // ------------------------------------------------------------ 渲染
 
   _render() {
-    const n = this.images.length;
-    if (!n) { if (this.tiles.size) this.clear(); return; }
+    if (!this.model.n || !this.layout) { if (this.tiles.size) this.clear(); return; }
     const C = this.cell, G = this.gap, z = this.z;
     const vw = this.stage.clientWidth, vh = this.stage.clientHeight;
-    const pad = C * 0.6; // 视口外多留一圈，拖动时边缘不露底
-    const x0 = -this.tx / z - pad, y0 = -this.ty / z - pad;
-    const x1 = (vw - this.tx) / z + pad, y1 = (vh - this.ty) / z + pad;
-    const bw = BS * C;
-    const bx0 = Math.floor(x0 / bw), bx1 = Math.floor(x1 / bw);
-    const by0 = Math.floor(y0 / bw), by1 = Math.floor(y1 / bw);
-    if ((bx1 - bx0 + 1) * (by1 - by0 + 1) > 900) return; // 防御：理论上 ZMIN 下到不了
+    // 加载区：视口外一圈；保留区再大一圈。只有出了保留区的块才回收
+    const pad = C * 0.6, keep = C * 2.2;
+    const x0 = -this.tx / z, y0 = -this.ty / z;
+    const x1 = (vw - this.tx) / z, y1 = (vh - this.ty) / z;
+    if ((x1 - x0) * (y1 - y0) > C * C * 2400) return; // 防御：理论上 ZMIN 下到不了
     const gen = ++this.gen;
     const frag = document.createDocumentFragment();
 
-    for (let by = by0; by <= by1; by++) {
-      for (let bx = bx0; bx <= bx1; bx++) {
-        const lay = this.tiling(bx, by, this.seed);
-        for (let k = 0; k < lay.length; k++) {
-          const t = lay[k];
-          const x = (bx * BS + t.x) * C, y = (by * BS + t.y) * C;
-          const w = t.w * C, h = t.h * C;
-          if (x > x1 || y > y1 || x + w < x0 || y + h < y0) continue;
-          const key = bx + ',' + by + ',' + t.i;
-          let rec = this.tiles.get(key);
-          if (!rec) {
-            rec = this._create(bx, by, t, x + G / 2, y + G / 2, w - G, h - G);
-            this.tiles.set(key, rec);
-            frag.appendChild(rec.el);
-          }
-          rec.gen = gen;
-        }
+    this.layout.query(x0 - pad, y0 - pad, x1 + pad, y1 + pad, C, (key, x, y, w, h, idx, short) => {
+      let rec = this.tiles.get(key);
+      if (!rec) {
+        rec = this._create(key, x + G / 2, y + G / 2, Math.max(1, w - G), Math.max(1, h - G), idx, short);
+        this.tiles.set(key, rec);
+        frag.appendChild(rec.el);
       }
-    }
+      rec.gen = gen;
+    });
     if (frag.childNodes.length) this.plane.appendChild(frag);
 
+    const kx0 = x0 - keep, ky0 = y0 - keep, kx1 = x1 + keep, ky1 = y1 + keep;
     for (const [key, rec] of this.tiles) {
-      if (rec.gen !== gen) {
+      if (rec.gen === gen) continue;
+      if (rec.x > kx1 || rec.y > ky1 || rec.x + rec.w < kx0 || rec.y + rec.h < ky0) {
         this.tiles.delete(key);
         this._release(rec);
       }
     }
   }
 
-  _create(bx, by, t, x, y, w, h) {
-    const im = this.images[pickIndex(bx, by, t.i, this.images.length, this.stride, this.seed)];
+  _create(key, x, y, w, h, idx, short) {
+    const im = this.images[idx];
     let el = this.pool.pop();
     if (!el) {
       el = document.createElement('div');
@@ -300,19 +359,39 @@ export class Wall {
       const name = document.createElement('span');
       name.className = 'name';
       el.appendChild(name);
+      el._name = name;
     }
     el.style.left = x + 'px';
     el.style.top = y + 'px';
     el.style.width = w + 'px';
     el.style.height = h + 'px';
-    const hh = hash2(bx * 31 + t.i, by * 17 - t.i);
-    // 占位底色：按位置取一个很暗的色相，加载前不是一片死灰
-    el.style.setProperty('--ph', String(hh % 360));
-    el.style.setProperty('--d', ((hh >>> 9) % 140) + 'ms');
-    el.firstChild.textContent = im.n;
-    el.classList.remove('err');
-    const rec = { el, im, x, y, w, h, short: Math.min(t.w, t.h), img: null, px: 0, want: 0, loader: null, gen: 0 };
+    // 占位色：用图片路径的哈希取一个暗色相；同一张图每次都是同一个颜色
+    let hh = 0;
+    for (let i = 0; i < im.p.length; i += 3) hh = (hh * 31 + im.p.charCodeAt(i)) | 0;
+    el.style.setProperty('--ph', String(Math.abs(hh) % 360));
+    // 整墙入场时按离屏幕中心的距离错开，像从中间铺开
+    const sx = (x + w / 2) * this.z + this.tx - this.stage.clientWidth / 2;
+    const sy = (y + h / 2) * this.z + this.ty - this.stage.clientHeight / 2;
+    el.style.setProperty('--d', Math.min(420, Math.hypot(sx, sy) * 0.35) + 'ms');
+    el._name.textContent = im.n;
+    el.classList.remove('err', 'loaded');
+    const rec = { key, el, im, x, y, w, h, short, img: null, px: 0, want: 0, loader: null, gen: 0 };
     el._rec = rec;
+
+    // 已经解码过就直接放上去，不做入场
+    const hit = this.cache.best(im, this.opt, this._desiredPx(rec));
+    if (hit) {
+      if (!hit.el.isConnected) this._attach(rec, hit.el, hit.px, false);
+      else {
+        // 同一张图正显示在别的块上（图少时会重复）：复制一份，数据在内存缓存里，解码很快
+        const cp = new Image();
+        cp.decoding = 'async';
+        cp.src = hit.el.src;
+        (cp.decode ? cp.decode() : Promise.resolve()).catch(() => {}).then(() => {
+          if (rec.el._rec === rec && !rec.img) this._attach(rec, cp, hit.px, false);
+        });
+      }
+    }
     this._want(rec);
     return rec;
   }
@@ -320,11 +399,14 @@ export class Wall {
   _release(rec) {
     this.queue.delete(rec);
     if (rec.loader) {
-      rec.loader.src = '';
+      rec.loader.onload = rec.loader.onerror = null;
+      // 已经开始下载的不取消：多半马上就到，进 LRU 下次直接用；还没开始的才中止
+      if (!rec.loader._started) rec.loader.src = '';
       rec.loader = null;
       this.active--;
     }
-    if (rec.img) { rec.img.remove(); rec.img = null; }
+    for (const img of rec.el.querySelectorAll('img')) img.remove();
+    rec.img = null;
     rec.el._rec = null;
     rec.el.remove();
     if (this.pool.length < POOL_MAX) this.pool.push(rec.el);
@@ -334,7 +416,10 @@ export class Wall {
 
   _desiredPx(rec) {
     const px = rec.short * this.cell * this.z * this.opt.dpr;
-    return snap(Math.min(this.opt.cap, Math.max(120, px)));
+    let cap = this.opt.cap;
+    // 弱网：先只要一档小图，停手后再按清晰度升级
+    if (!this.net.fast && !rec.px) cap = Math.min(cap, 320);
+    return snap(Math.min(cap, Math.max(120, px)));
   }
 
   _want(rec) {
@@ -350,22 +435,25 @@ export class Wall {
     this.upgradeTimer = setTimeout(() => {
       for (const rec of this.tiles.values()) if (!rec.loader) this._want(rec);
       this._pump();
-    }, 180);
+    }, this.net.fast ? 180 : 600);
   }
 
   _pump() {
-    if (!this.queue.size || this.active >= MAX_LOADS) return;
+    if (!this.queue.size || this.active >= this.maxLoads) return;
     const vw = this.stage.clientWidth, vh = this.stage.clientHeight;
     const cx = (vw / 2 - this.tx) / this.z, cy = (vh / 2 - this.ty) / this.z;
     // 往运动方向前瞻：正在滑向哪边，那边先加载
     const lx = cx - this.vx * 400 / this.z, ly = cy - this.vy * 400 / this.z;
-    while (this.active < MAX_LOADS && this.queue.size) {
+    const moving = this.vx || this.vy || this.pointers.size || this.zAnchor;
+    while (this.active < this.maxLoads && this.queue.size) {
       let best = null, bd = Infinity;
       for (const rec of this.queue) {
-        // 首次加载远比升级清晰度要紧
+        // 首次加载远比升级清晰度要紧；在动的时候不升级
+        if (rec.px && moving) continue;
         const d = ((rec.x + rec.w / 2 - lx) ** 2 + (rec.y + rec.h / 2 - ly) ** 2) * (rec.px ? 9 : 1);
         if (d < bd) { bd = d; best = rec; }
       }
+      if (!best) return;
       this.queue.delete(best);
       this._load(best);
     }
@@ -373,13 +461,15 @@ export class Wall {
 
   _load(rec) {
     const px = rec.want;
-    if (rec.loader) { rec.loader.src = ''; rec.loader = null; this.active--; }
+    const im = rec.im;
+    const opt = { q: this.opt.q, fmt: this.opt.fmt };
     const ld = new Image();
     ld.decoding = 'async';
     ld.draggable = false;
     ld.alt = '';
     rec.loader = ld;
     this.active++;
+    const t0 = performance.now();
     const done = () => {
       if (rec.loader !== ld) return false; // 已被回收或换了新的请求
       rec.loader = null;
@@ -387,21 +477,12 @@ export class Wall {
       return true;
     };
     ld.onload = () => {
+      this._netSample(performance.now() - t0, px);
       // decode() 在后台线程解码，解完再插进 DOM，滑动时不卡主线程
-      const dec = ld.decode ? ld.decode() : Promise.resolve();
-      dec.catch(() => {}).then(() => {
+      (ld.decode ? ld.decode() : Promise.resolve()).catch(() => {}).then(() => {
+        this.cache.put(im, px, opt, ld);
         if (!done()) return;
-        const first = !rec.img;
-        if (first) ld.className = 'in';
-        else ld.className = 'on';
-        rec.el.insertBefore(ld, rec.el.firstChild);
-        if (rec.img) rec.img.remove();
-        rec.img = ld;
-        rec.px = px;
-        if (first) {
-          if (this.motion) void ld.offsetWidth; // 先让 .in 生效一次，过渡才有起点
-          ld.className = 'on';
-        }
+        this._attach(rec, ld, px, !rec.img && this.motion);
         this._pump();
       });
     };
@@ -411,7 +492,49 @@ export class Wall {
       rec.px = Math.max(rec.px, px); // 别反复重试同一档
       this._pump();
     };
-    ld.src = thumbUrl(rec.im, px, this.opt);
+    ld._started = true;
+    ld.src = thumbUrl(im, px, this.opt);
+  }
+
+  /** 把一张已解码的图放进块。animate：首次出现时做入场；升级清晰度时新图盖在旧图上淡入。 */
+  _attach(rec, img, px, animate) {
+    const prev = rec.img;
+    if (prev === img) return;
+    img.className = '';
+    if (animate) {
+      img.classList.add('in');
+      rec.el.insertBefore(img, rec.el._name);
+      void img.offsetWidth; // 先让 .in 生效一次，过渡才有起点
+      img.classList.replace('in', 'on');
+    } else if (prev) {
+      // 升级：新图在上层淡入，旧图在下面垫着，淡入完再移除
+      img.classList.add('up');
+      rec.el.insertBefore(img, rec.el._name);
+      void img.offsetWidth;
+      img.classList.add('on');
+      setTimeout(() => { if (prev !== rec.img) prev.remove(); }, 400);
+    } else {
+      img.classList.add('on', 'now');
+      rec.el.insertBefore(img, rec.el._name);
+    }
+    rec.img = img;
+    rec.px = Math.max(rec.px, px);
+    rec.el.classList.add('loaded');
+  }
+
+  /** 按缩略图实际耗时判断网速：慢就少并发、先要小图。 */
+  _netSample(ms, px) {
+    const s = this.net.samples;
+    s.push(ms / Math.max(1, (px / 320) ** 2));
+    if (s.length > 12) s.shift();
+    if (s.length < 4) return;
+    const med = [...s].sort((a, b) => a - b)[s.length >> 1];
+    const fast = med < 650;
+    if (fast !== this.net.fast) {
+      this.net.fast = fast;
+      this.maxLoads = fast ? 8 : 4;
+      this.hooks.onNet && this.hooks.onNet(fast);
+    }
   }
 
   // ------------------------------------------------------------ 输入
@@ -524,7 +647,6 @@ export class Wall {
       const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? st.clientHeight : 1;
       const dx = e.deltaX * unit, dy = e.deltaY * unit;
       if (e.ctrlKey || e.metaKey) {
-        // 触控板捏合是一串很小的 delta，鼠标滚轮是一格 100 左右；两种都走平滑追随
         this.zoomAt(e.clientX, e.clientY, Math.exp(-dy * 0.0022));
       } else {
         this.vx = this.vy = 0;

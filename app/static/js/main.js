@@ -3,6 +3,7 @@ import { api } from './api.js';
 import * as settings from './settings.js';
 import { Wall } from './wall.js';
 import { Lightbox } from './lightbox.js';
+import { LAYOUTS, getLayout } from './layout/index.js';
 
 const S = settings.load();
 const state = { path: '', images: [], roots: [], webp: false, seed: 0, loadToken: 0 };
@@ -19,6 +20,9 @@ const wall = new Wall($('stage'), $('plane'), {
     document.body.classList.add('moving');
     clearTimeout(movingTimer);
     movingTimer = setTimeout(() => document.body.classList.remove('moving'), 700);
+  },
+  onNet: (fast) => {
+    if (!fast) toast('网络较慢：先显示小图，停下后再换清晰的', 3200);
   },
   onView: () => {
     $('zoomText').textContent = Math.round(wall.z * 100) + '%';
@@ -37,6 +41,7 @@ function applySettings() {
   document.body.classList.toggle('names', S.names);
   document.documentElement.style.setProperty('--r', S.gap ? '6px' : '0px');
   wall.setMotion(S.motion);
+  wall.setLayoutType(getLayout(S.layout).id);
   wall.setLayout(S.cell, S.gap);
   wall.setThumbOptions({
     q: S.q,
@@ -54,7 +59,7 @@ function saveViewSoon() {
     if (!state.path) return;
     try {
       const all = JSON.parse(localStorage.getItem(VIEW_KEY) || '{}');
-      all[state.path] = { ...wall.view(), seed: state.seed, cell: S.cell, at: Date.now() };
+      all[state.path] = { ...wall.view(), seed: state.seed, cell: S.cell, layout: S.layout, at: Date.now() };
       const keys = Object.keys(all);
       if (keys.length > 40) {
         keys.sort((a, b) => all[a].at - all[b].at).slice(0, keys.length - 40).forEach((k) => delete all[k]);
@@ -67,7 +72,7 @@ function saveViewSoon() {
 function loadView(path) {
   try {
     const v = JSON.parse(localStorage.getItem(VIEW_KEY) || '{}')[path];
-    if (v && v.cell === S.cell) return v;
+    if (v && v.cell === S.cell && (v.layout || 'collage') === S.layout) return v;
   } catch (_) { /* noop */ }
   return null;
 }
@@ -76,10 +81,15 @@ function loadView(path) {
 
 const lightbox = new Lightbox({
   getList: () => state.images,
-  getOpt: () => ({ q: S.q, fmt: fmtOf() }),
+  getOpt: () => ({ q: S.q, fmt: fmtOf(), fast: wall.net.fast }),
   rectFor: (im) => {
     const rec = wall.findRec(im);
     return rec ? wall.rectOf(rec) : null;
+  },
+  thumbFor: (im) => wall.cachedThumb(im),
+  onOpen: () => { wall.setDrift(false); },
+  onClose: () => {
+    if ($('btnDrift').getAttribute('aria-pressed') === 'true') wall.setDrift(true);
   },
 });
 
@@ -140,6 +150,23 @@ async function loadFolder(path, { refresh = false, keepView = false } = {}) {
     wall.setImages(state.images, state.seed);
   }
   maybeAutoWarm();
+  if (data.missing) prefetchDims(path, token);
+}
+
+// 第一次打开的文件夹，服务端还在后台读图片尺寸。等它读完再静默拉一次清单，
+// 存进浏览器缓存（ETag），下次打开就能按横竖图排；当前这面墙不动，免得眼前突然重排。
+function prefetchDims(path, token) {
+  let tries = 0;
+  const tick = async () => {
+    if (token !== state.loadToken || ++tries > 40) return;
+    const h = await fetch('api/health').then((r) => r.json()).catch(() => null);
+    if (h && h.dimsPending === 0) {
+      api.images(path).catch(() => {});
+      return;
+    }
+    setTimeout(tick, 4000);
+  };
+  setTimeout(tick, 3000);
 }
 
 const fs = { path: '', dirs: [], parent: '', kb: -1 };
@@ -294,7 +321,22 @@ function paintSeg(id, val) {
   }
 }
 
+const LAYOUT_TIPS = {
+  collage: '大小块拼贴。横图给宽格、竖图给高格，尽量少裁切。',
+  justified: '等高行，按原比例排，几乎不裁切。',
+  grid: '整齐的方格，适合快速扫图。',
+};
+function paintLayouts() {
+  const seg = $('segLayout');
+  if (!seg.querySelector('button')) {
+    seg.innerHTML = LAYOUTS.map((l) => `<button data-v="${l.id}">${esc(l.label)}</button>`).join('');
+  }
+  $('layoutTip').textContent = LAYOUT_TIPS[getLayout(S.layout).id] || '';
+}
+
 function paintAll() {
+  paintLayouts();
+  paintSeg('segLayout', getLayout(S.layout).id);
   paintSeg('segDetail', S.detail);
   paintSeg('segQ', S.q);
   paintSeg('segFmt', S.fmt);
@@ -312,9 +354,13 @@ function bindSeg(id, key, cast) {
     S[key] = cast(b.dataset.v);
     settings.save(S);
     paintSeg(id, S[key]);
-    applySettings();
+    if (key === 'layout') {
+      $('layoutTip').textContent = LAYOUT_TIPS[S[key]] || '';
+      transition(() => applySettings());
+    } else applySettings();
   });
 }
+bindSeg('segLayout', 'layout', String);
 bindSeg('segDetail', 'detail', String);
 bindSeg('segQ', 'q', Number);
 bindSeg('segFmt', 'fmt', String);
@@ -395,19 +441,24 @@ $('btnZoomIn').onclick = () => wall.zoomCenter(1.25);
 $('btnZoomOut').onclick = () => wall.zoomCenter(1 / 1.25);
 $('zoomText').onclick = () => wall.zoomCenter(1 / wall.zTarget);
 
+/** 整面墙换内容：旧墙淡出，换完新墙逐块落定。 */
+function transition(apply) {
+  const plane = $('plane');
+  const go = () => {
+    apply();
+    plane.classList.remove('leave');
+    if (S.motion) { plane.classList.add('enter'); setTimeout(() => plane.classList.remove('enter'), 900); }
+    saveViewSoon();
+  };
+  if (S.motion) { plane.classList.add('leave'); setTimeout(go, 220); } else go();
+}
+
 function shuffle() {
   if (!state.images.length) return;
   state.seed = (state.seed + 1) % 100000;
   const b = $('btnShuffle');
   b.classList.remove('spin'); void b.offsetWidth; b.classList.add('spin');
-  const plane = $('plane');
-  const apply = () => {
-    wall.setSeed(state.seed);
-    plane.classList.remove('leave');
-    if (S.motion) { plane.classList.add('enter'); setTimeout(() => plane.classList.remove('enter'), 900); }
-    saveViewSoon();
-  };
-  if (S.motion) { plane.classList.add('leave'); setTimeout(apply, 220); } else apply();
+  transition(() => wall.setSeed(state.seed));
 }
 $('btnShuffle').onclick = shuffle;
 

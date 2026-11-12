@@ -1,77 +1,114 @@
-// node --test test/
+// node --test test/layout.test.mjs
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { BS, tiling, pickIndex, strideFor, hash2, memoTiling } from '../app/static/js/layout.js';
+import { collageBlock, BS } from '../app/static/js/layout/collage.js';
+import { justifiedSegment } from '../app/static/js/layout/justified.js';
+import { LAYOUTS, buildModel } from '../app/static/js/layout/index.js';
+import { hash2, strideFor } from '../app/static/js/layout/hash.js';
 
-test('每个 block 铺满、无重叠、不越界', () => {
-  let blocks = 0, tiles = 0;
-  for (const seed of [0, 1, 99]) {
-    for (let by = -12; by <= 12; by++) {
-      for (let bx = -12; bx <= 12; bx++) {
-        const grid = new Uint8Array(BS * BS);
-        for (const t of tiling(bx, by, seed)) {
-          assert.ok(t.x >= 0 && t.y >= 0 && t.x + t.w <= BS && t.y + t.h <= BS, '越界');
-          for (let y = t.y; y < t.y + t.h; y++)
-            for (let x = t.x; x < t.x + t.w; x++) {
-              assert.equal(grid[y * BS + x], 0, '重叠');
-              grid[y * BS + x] = 1;
-            }
-          tiles++;
-        }
-        assert.ok(grid.every((v) => v === 1), '有空洞');
-        blocks++;
+// 按真实图库的比例造清单：截图横图多、插画竖图多、少量方图和长图；一部分尺寸未知
+function images(n, knownRatio = 1) {
+  const pool = [178, 178, 160, 133, 70, 75, 56, 100, 100, 300, 30];
+  return Array.from({ length: n }, (_, i) => ({ a: hash2(i, 3) % 100 < knownRatio * 100 ? pool[hash2(i, 9) % pool.length] : 0 }));
+}
+
+function checkCover(blockFn, model, range = 10) {
+  for (let by = -range; by <= range; by++)
+    for (let bx = -range; bx <= range; bx++) {
+      const grid = new Uint8Array(BS * BS);
+      for (const t of blockFn(bx, by, model)) {
+        assert.ok(t.x >= 0 && t.y >= 0 && t.x + t.w <= BS && t.y + t.h <= BS, '越界');
+        assert.ok(t.idx >= 0 && t.idx < model.n, '下标越界');
+        for (let y = t.y; y < t.y + t.h; y++)
+          for (let x = t.x; x < t.x + t.w; x++) {
+            assert.equal(grid[y * BS + x], 0, `重叠 ${bx},${by}`);
+            grid[y * BS + x] = 1;
+          }
       }
+      assert.ok(grid.every((v) => v === 1), `有空洞 ${bx},${by}`);
     }
+}
+
+test('拼贴：铺满、无重叠、不越界（尺寸已知 / 未知 / 混合 / 极少图）', () => {
+  for (const [n, k] of [[500, 1], [500, 0], [500, 0.5], [3, 1], [1, 0], [12455, 0.7]]) {
+    checkCover(collageBlock, buildModel(images(n, k), 0));
+    checkCover(collageBlock, buildModel(images(n, k), 7), 3);
   }
-  assert.ok(blocks === 3 * 625 && tiles > blocks * 8);
 });
 
-test('布局与选图是纯函数：同输入同输出', () => {
-  const a = JSON.stringify(tiling(-3, 7));
-  for (let i = 0; i < 5; i++) assert.equal(JSON.stringify(tiling(-3, 7)), a);
-  const memo = memoTiling(4);
-  for (let i = 0; i < 50; i++) memo(i, -i); // 撑爆缓存
-  assert.equal(JSON.stringify(memo(-3, 7)), a);
-  assert.equal(pickIndex(5, -2, 3, 1000, strideFor(1000)), pickIndex(5, -2, 3, 1000, strideFor(1000)));
-  assert.equal(hash2(1, 2), hash2(1, 2));
+test('拼贴：纯函数，同输入同输出', () => {
+  const m1 = buildModel(images(800), 0), m2 = buildModel(images(800), 0);
+  for (let i = -5; i < 5; i++) assert.deepEqual(collageBlock(i, -i * 3, m1), collageBlock(i, -i * 3, m2));
 });
 
-test('换一批（seed）确实换了布局', () => {
-  let diff = 0;
-  for (let i = 0; i < 20; i++) if (JSON.stringify(tiling(i, i)) !== JSON.stringify(tiling(i, i, 1))) diff++;
-  assert.ok(diff > 10);
-});
-
-test('形状占比在预期范围', () => {
-  const area = { '1x1': 0, '2x1': 0, '1x2': 0, '2x2': 0 };
-  let n = 0;
-  for (let by = 0; by < 60; by++)
-    for (let bx = 0; bx < 60; bx++)
-      for (const t of tiling(bx, by)) { area[t.w + 'x' + t.h]++; n++; }
-  const p = (k) => area[k] / n;
-  assert.ok(p('1x1') > 0.5 && p('1x1') < 0.75, '1x1 ' + p('1x1'));
-  assert.ok(p('2x2') > 0.05 && p('2x2') < 0.16, '2x2 ' + p('2x2'));
-});
-
-test('图片够多时一个 block 内不重复', () => {
+test('拼贴：图片 ≥ 16 张时 block 内不重复', () => {
   for (const n of [16, 17, 100, 12455]) {
-    const s = strideFor(n);
-    for (let by = -5; by < 5; by++)
-      for (let bx = -5; bx < 5; bx++) {
-        const lay = tiling(bx, by);
-        const seen = new Set(lay.map((t) => pickIndex(bx, by, t.i, n, s)));
-        assert.equal(seen.size, lay.length, `n=${n} block ${bx},${by}`);
+    const m = buildModel(images(n), 0);
+    for (let by = -6; by < 6; by++)
+      for (let bx = -6; bx < 6; bx++) {
+        const lay = collageBlock(bx, by, m);
+        assert.equal(new Set(lay.map((t) => t.idx)).size, lay.length, `n=${n}`);
       }
   }
 });
 
-test('选图下标始终在范围内（含 1、2 张的极端）', () => {
-  for (const n of [1, 2, 3, 7, 31]) {
-    const s = strideFor(n);
-    for (let i = 0; i < 16; i++) {
-      const k = pickIndex(-9, 4, i, n, s);
-      assert.ok(Number.isInteger(k) && k >= 0 && k < n);
+test('拼贴：格子形状跟着图走（裁切少）', () => {
+  const m = buildModel(images(2000), 0);
+  let match = 0, total = 0, crop = 0;
+  for (let by = 0; by < 40; by++)
+    for (let bx = 0; bx < 40; bx++)
+      for (const t of collageBlock(bx, by, m)) {
+        const a = m.aspect[t.idx], c = t.w / t.h;
+        total++;
+        if ((a > 1.25 && c > 1) || (a < 0.8 && c < 1) || (a >= 0.8 && a <= 1.25 && c === 1)) match++;
+        // 被裁掉的面积比例
+        crop += 1 - Math.min(a, c) / Math.max(a, c);
+      }
+  assert.ok(match / total > 0.7, `形状匹配 ${(match / total * 100).toFixed(0)}%`);
+  assert.ok(crop / total < 0.3, `平均裁掉 ${(crop / total * 100).toFixed(0)}%`);
+});
+
+test('拼贴：大小块都有，不是一片 1×1', () => {
+  const m = buildModel(images(2000), 0);
+  const area = {};
+  let n = 0;
+  for (let by = 0; by < 40; by++)
+    for (let bx = 0; bx < 40; bx++)
+      for (const t of collageBlock(bx, by, m)) { const k = t.w * t.h; area[k] = (area[k] || 0) + 1; n++; }
+  assert.ok((area[1] || 0) / n < 0.6, '1×1 太多');
+  assert.ok(((area[4] || 0) + (area[6] || 0)) / n > 0.05, '大块太少');
+});
+
+test('等高行：每段正好填满、无重叠', () => {
+  const m = buildModel(images(500), 0);
+  const asp = (i) => m.aspect[i];
+  for (let row = -5; row < 5; row++)
+    for (let seg = -5; seg < 5; seg++) {
+      const s = justifiedSegment(row, seg, m, asp);
+      let x = 0;
+      for (const t of s) { assert.ok(Math.abs(t.x - x) < 1e-6); assert.ok(t.w > 0); x += t.w; }
+      assert.ok(Math.abs(x - 6) < 1e-6, '段宽不等于 6');
     }
+});
+
+test('所有形式：query 纯、key 唯一、视口铺满', () => {
+  const m = buildModel(images(600), 0);
+  for (const L of LAYOUTS) {
+    const a = [], b = [];
+    L.create(m).query(-2000, -1500, 2000, 1500, 280, (...r) => a.push(r.join('|')));
+    L.create(m).query(-2000, -1500, 2000, 1500, 280, (...r) => b.push(r.join('|')));
+    assert.deepEqual(a, b, L.id + ' 不纯');
+    const keys = a.map((r) => r.split('|')[0]);
+    assert.equal(new Set(keys).size, keys.length, L.id + ' key 重复');
+    // 采样点覆盖
+    const rects = a.map((r) => r.split('|').slice(1, 5).map(Number));
+    for (let y = -1400; y < 1400; y += 97)
+      for (let x = -1900; x < 1900; x += 97)
+        assert.ok(rects.some(([rx, ry, w, h]) => x >= rx && x < rx + w && y >= ry && y < ry + h), `${L.id} 空洞 ${x},${y}`);
   }
-  assert.equal(pickIndex(0, 0, 0, 0, 1), -1);
+});
+
+test('步长与 n 互质', () => {
+  const g = (a, b) => (b ? g(b, a % b) : a);
+  for (const n of [1, 2, 3, 16, 100, 12455]) assert.equal(g(strideFor(n), n), 1);
 });

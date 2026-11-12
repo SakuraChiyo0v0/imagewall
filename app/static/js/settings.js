@@ -14,6 +14,7 @@ export const DETAIL = {
 export const CELLS = [200, 280, 360, 460];
 
 export const defaults = {
+  layout: 'collage',
   detail: 'mid',
   q: 78,
   fmt: 'auto',  // auto = 服务端支持就用 WebP
