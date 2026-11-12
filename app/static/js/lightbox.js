@@ -3,8 +3,13 @@
 //
 // 位置用一个无界整数 pos 记，图片下标 = pos mod n。左右切换、胶片条、循环都按 pos 算，
 // 图少时绕回开头也不会错位。
+//
+// 每张 slide 是一个按原图宽高比算好大小的「框」，里面叠两张图：缩略图垫底，清晰图到了在上面淡入。
+// 框的大小从一开始就是最终大小（宽高比来自清单），所以清晰图到了只是变清楚，不会再变大一次。
+// 打开时只给框做 transform / clip-path 动画（从格子飞到中间），不动 filter、不动宽高，
+// 手机上也能稳住帧率；氛围光、胶片条、两侧的清晰图都等飞完再开始。
 
-import { $, clamp, esc, fmtBytes, fmtDate, showLayer, reducedMotion } from './util.js';
+import { $, clamp, esc, fmtBytes, fmtDate, reducedMotion } from './util.js';
 import { previewUrl, rawUrl, thumbUrl } from './api.js';
 
 const ZMAX = 8;
@@ -16,11 +21,12 @@ const PLAY_MS = 5000;
 const mod = (a, n) => ((a % n) + n) % n;
 
 export class Lightbox {
-  constructor({ getList, getOpt, rectFor, thumbFor, onOpen, onClose }) {
+  constructor({ getList, getOpt, rectFor, thumbFor, thumbElFor, onOpen, onClose }) {
     this.getList = getList;
     this.getOpt = getOpt;
     this.rectFor = rectFor;
     this.thumbFor = thumbFor;
+    this.thumbElFor = thumbElFor || (() => null);
     this.onOpen = onOpen;
     this.onClose = onClose;
     this.root = $('lightbox');
@@ -35,11 +41,19 @@ export class Lightbox {
     this.openTs = 0;
     this.z = 1; this.x = 0; this.y = 0;
     this.playing = false; this.playT = 0;
+    this._vp();
     this._bind();
   }
 
-  get isOpen() { return !this.root.hidden && this.root.classList.contains('open'); }
-  get img() { const s = this.slides.get(this.pos); return s && s.img; }
+  /** 舞台尺寸缓存：读 clientWidth / getBoundingClientRect 会在 DOM 刚改过时强制整页布局。 */
+  _vp() {
+    this.vw = window.innerWidth;
+    this.vh = window.innerHeight;
+  }
+
+  get isOpen() { return this.root.classList.contains('open'); }
+  /** 当前 slide 的框（缩放、拖动、飞入飞出都作用在它上面）。 */
+  get img() { const s = this.slides.get(this.pos); return s && s.box; }
   get cur() { const l = this.getList(); return l.length ? l[mod(this.pos, l.length)] : null; }
 
   previewWidth() {
@@ -53,27 +67,61 @@ export class Lightbox {
     const list = this.getList();
     const idx = list.indexOf(im);
     if (idx < 0) return;
+    // 格子的屏幕位置先算好：lightbox 一显示，再读布局就要等整页重排
+    const from = rec && !reducedMotion() ? this.rectFor(im) : null;
     this._clearSlides();
     this.pos = idx;
     this.openTs = performance.now();
-    showLayer(this.root, true);
-    document.body.classList.add('lb-on');
+    // 飞的这 ~400ms 里只做一件事：框从格子飞到中间。两侧清晰图、胶片条、氛围光都推迟到落地后
+    this.flying = !!from;
+    this.root.classList.toggle('flying', this.flying);
+    this.root.classList.add('open');
+    document.body.classList.add('lb-open');
     this.onOpen && this.onOpen();
     this._sync(0, true);
-    // 飞出：从格子的位置 / 大小变形到大图的位置
     const s = this.slides.get(this.pos);
-    if (rec && s && !reducedMotion()) {
-      const from = this.rectFor(im);
-      requestAnimationFrame(() => {
-        const to = s.img.getBoundingClientRect();
-        if (from && to.width) this._flip(s.img, from, to);
-      });
+    const land = () => {
+      if (!this.flying) return;
+      this.flying = false;
+      // 落地后的活分两拍做，免得一帧里堆太多：先补两侧 slide 和画布退后，下一拍再排文字和胶片条
+      document.body.classList.add('lb-on');
+      this._landing = true;
+      this._sync(0, true);
+      this._landing = false;
+      const idle = window.requestIdleCallback || ((f) => setTimeout(f, 60));
+      idle(() => {
+        if (!this.isOpen || this.flying) return;
+        this.root.classList.remove('flying');
+        this._meta();
+        this._ambient();
+        this._strip(true);
+      }, { timeout: 250 });
+    };
+    if (from && s) {
+      const a = this._flip(s.box, from, this._targetRect(s));
+      a.onfinish = a.oncancel = land;
+    } else {
+      document.body.classList.add('lb-on');
+      land();
     }
+    setTimeout(land, 700); // 保底：动画事件丢了也要落地
+  }
+
+  /** 当前 slide 的框落地后在屏幕上的矩形（直接算，不读布局）。 */
+  _targetRect(s) {
+    const W = this.vw, H = this.vh;
+    const w = parseFloat(s.box.style.width), h = parseFloat(s.box.style.height);
+    const small = W < 700;
+    const padT = small ? 56 : 64, padB = small ? 108 : 118;
+    const cy = padT + (H - padT - padB) / 2;
+    return { left: (W - w) / 2, top: cy - h / 2, width: w, height: h };
   }
 
   close() {
-    if (this.root.hidden) return;
+    if (!this.isOpen) return;
     this.stop();
+    this.flying = false;
+    this.root.classList.remove('flying');
     const im = this.cur;
     const img = this.img;
     const to = im && this.rectFor(im);
@@ -81,8 +129,19 @@ export class Lightbox {
       const from = img.getBoundingClientRect();
       if (from.width) this._flipBack(img, from, to);
     }
-    showLayer(this.root, false);
-    document.body.classList.remove('lb-on');
+    this.root.classList.remove('open');
+    document.body.classList.remove('lb-on', 'lb-open');
+    // 关的时候清掉文字、胶片条和 slide：下次打开的第一帧不用先删旧节点、给旧文字排版，
+    // 点下去到看见图的那一下能省 50–100ms（手机上尤其明显）
+    clearTimeout(this._clrT);
+    this._clrT = setTimeout(() => {
+      if (this.isOpen) return;
+      $('lbName').textContent = ''; $('lbInfo').textContent = '';
+      for (const el of this.thumbs.values()) el.remove();
+      this.thumbs.clear();
+      for (const s of this.slides.values()) s.el.remove();
+      this.slides.clear();
+    }, 320);
     this.onClose && this.onClose(im);
   }
 
@@ -111,7 +170,7 @@ export class Lightbox {
     this.root.classList.remove('playing');
     $('lbPlay').setAttribute('aria-pressed', 'false');
     const s = this.slides.get(this.pos);
-    if (s) s.img.classList.remove('kb');
+    if (s) s.box.classList.remove('kb');
   }
 
   _restartPlay() {
@@ -122,11 +181,11 @@ export class Lightbox {
     bar.style.animation = `lb-prog ${PLAY_MS}ms linear both`;
     const s = this.slides.get(this.pos);
     if (s && !reducedMotion()) {
-      s.img.classList.remove('kb');
-      void s.img.offsetWidth;
-      s.img.style.setProperty('--kb-x', (((this.pos * 37) % 7) - 3) + '%');
-      s.img.style.setProperty('--kb-y', (((this.pos * 53) % 5) - 2) + '%');
-      s.img.classList.add('kb');
+      s.box.classList.remove('kb');
+      void s.box.offsetWidth;
+      s.box.style.setProperty('--kb-x', (((this.pos * 37) % 7) - 3) + '%');
+      s.box.style.setProperty('--kb-y', (((this.pos * 53) % 5) - 2) + '%');
+      s.box.classList.add('kb');
     }
     this.playT = setTimeout(() => this.step(1), PLAY_MS);
   }
@@ -144,7 +203,7 @@ export class Lightbox {
   _sync(d, first, carry = 0) {
     const list = this.getList();
     const n = list.length;
-    const span = Math.min(SPAN, Math.floor((n - 1) / 2));
+    const span = this.flying ? 0 : Math.min(SPAN, Math.floor((n - 1) / 2));
     for (const [p, s] of this.slides) {
       if (Math.abs(p - this.pos) > span) {
         s.el.classList.add('gone');
@@ -160,7 +219,8 @@ export class Lightbox {
       // 新进来的从更远处滑进来
       s.el.style.transition = 'none';
       s.el.style.transform = this._slideTf(first ? o : o + Math.sign(d || o || 1));
-      s.el.style.opacity = '0';
+      // 打开时当前这张直接可见（飞入动画负责出场）；其余从透明滑进来
+      s.el.style.opacity = first && o === 0 ? '' : '0';
       this.track.appendChild(s.el);
       this.slides.set(p, s);
     }
@@ -172,7 +232,8 @@ export class Lightbox {
         s.el.style.transform = this._slideTf(p - this.pos + d, carry);
       }
     }
-    void this.track.offsetWidth;
+    // 让上面设的起点生效，下面再设终点才有过渡；只有一张（刚打开）时不需要
+    if (this.slides.size > 1) void this.track.offsetWidth;
     for (const [p, s] of this.slides) {
       const o = p - this.pos;
       s.el.style.transition = '';
@@ -180,16 +241,17 @@ export class Lightbox {
       s.el.style.transform = this._slideTf(o);
       s.el.classList.toggle('cur', o === 0);
       s.el.classList.toggle('side', o !== 0);
-      // 当前与左右各一张要清晰版，更远的只放缩略图
-      if (Math.abs(o) <= 1) this._loadFull(s);
+      // 当前与左右各一张要清晰版，更远的只放缩略图；飞的时候只加载当前这张
+      if (o === 0 || (!this.flying && Math.abs(o) <= 1)) this._loadFull(s);
     }
+    if (this.flying || this._landing) return;
     this._meta();
     this._ambient();
     this._strip(first);
   }
 
   _slideTf(o, extra = 0) {
-    const w = this.stage.clientWidth;
+    const w = this.vw;
     const gap = w < 700 ? w * 0.96 : Math.min(w * 0.58, 980);
     const a = Math.abs(o);
     const s = a === 0 ? 1 : a === 1 ? 0.66 : 0.5;
@@ -197,19 +259,60 @@ export class Lightbox {
     return `translate3d(${x}px,0,0) scale(${s})`;
   }
 
+  /** 大图在屏幕上的最终大小：按原图宽高比放进可用区域（小图不放大到超过原图像素）。 */
+  _fit(im, natural) {
+    const vw = this.vw, vh = this.vh;
+    const small = vw < 700;
+    const maxW = vw * (small ? 0.96 : 0.84);
+    const maxH = vh - (small ? 164 : 182);
+    let a = (im.a || 0) / 100;
+    if (!a && natural && natural.h) a = natural.w / natural.h;
+    if (!a) a = 4 / 3;
+    let w = Math.min(maxW, maxH * a);
+    if (natural && natural.w > 64 && natural.w < w) w = natural.w;
+    return { w: Math.round(w), h: Math.round(w / a), known: !!(im.a || natural) };
+  }
+
+  _sizeBox(s, natural) {
+    const f = this._fit(s.im, natural);
+    s.box.style.width = f.w + 'px';
+    s.box.style.height = f.h + 'px';
+    s.sized = f.known;
+  }
+
   _makeSlide(p, im) {
     const el = document.createElement('div');
     el.className = 'lb-slide';
-    const img = new Image();
-    img.decoding = 'async';
-    img.draggable = false;
-    img.alt = '';
-    const th = this.thumbFor(im);
-    if (th) img.src = th;
-    img.onload = () => img.classList.add('ready');
-    el.appendChild(img);
+    const box = document.createElement('div');
+    box.className = 'lb-box';
+    // 缩略图：直接把格子里已解码的位图画到 canvas 上（同步完成，第一帧就有图）。
+    // 新建 <img> 指向同一 URL 也得重新解码，手机上要几十毫秒，飞出来那一下就是空框
+    let thumb = null;
+    const src = this.thumbElFor(im);
+    if (src && src.complete && src.naturalWidth) {
+      try {
+        const c = document.createElement('canvas');
+        c.width = src.naturalWidth; c.height = src.naturalHeight;
+        c.getContext('2d').drawImage(src, 0, 0);
+        c.className = 'lb-thumb';
+        thumb = c;
+      } catch (_) { thumb = null; }
+    }
+    if (!thumb) {
+      thumb = new Image();
+      thumb.decoding = 'sync';
+      thumb.draggable = false;
+      thumb.alt = '';
+      thumb.className = 'lb-thumb';
+      const th = this.thumbFor(im);
+      thumb.src = th || thumbUrl(im, 320, this.getOpt());
+    }
+    box.appendChild(thumb);
+    el.appendChild(box);
     el.dataset.p = p;
-    return { el, img, im, p, full: false };
+    const s = { el, box, thumb, im, p, full: false, sized: false, fullImg: null };
+    this._sizeBox(s, null);
+    return s;
   }
 
   _loadFull(s) {
@@ -221,18 +324,26 @@ export class Lightbox {
     if (isCur()) this.root.classList.add('loading');
     const full = new Image();
     full.decoding = 'async';
+    full.draggable = false;
+    full.alt = '';
+    full.className = 'lb-full';
     full.onload = () => {
       (full.decode ? full.decode() : Promise.resolve()).catch(() => {}).then(() => {
         if (!s.el.isConnected) return;
-        s.img.src = url;
-        s.img.classList.add('ready', 'sharp');
+        // 清单里没有宽高比（尺寸还没读到）时才用实际尺寸修正一次框
+        if (!s.sized) this._sizeBox(s, { w: full.naturalWidth, h: full.naturalHeight });
+        // 清晰图盖在缩略图上淡入；缩略图留着垫底，不会有空白的一帧
+        s.box.appendChild(full);
+        requestAnimationFrame(() => full.classList.add('ready'));
+        s.box.classList.add('sharp');
+        s.fullImg = full;
         if (isCur()) this.root.classList.remove('loading');
       });
     };
     full.onerror = () => {
       if (isCur()) {
         this.root.classList.remove('loading');
-        if (!s.img.complete || !s.img.naturalWidth) $('lbErr').hidden = false;
+        if (s.thumb.tagName === 'IMG' && (!s.thumb.complete || !s.thumb.naturalWidth)) $('lbErr').hidden = false;
       }
     };
     full.src = url;
@@ -244,7 +355,7 @@ export class Lightbox {
     const n = this.getList().length;
     $('lbErr').hidden = true;
     const s = this.slides.get(this.pos);
-    this.root.classList.toggle('loading', !!(s && !s.img.classList.contains('sharp')));
+    this.root.classList.toggle('loading', !!(s && !s.box.classList.contains('sharp')));
     $('lbName').textContent = im.n;
     $('lbName').title = im.p;
     $('lbInfo').innerHTML =
@@ -278,6 +389,7 @@ export class Lightbox {
     for (const [p, el] of this.thumbs) {
       if (Math.abs(p - this.pos) > span + 1) { el.remove(); this.thumbs.delete(p); }
     }
+    let entering = false;
     for (let o = -span - 1; o <= span + 1; o++) {
       const p = this.pos + o;
       let el = this.thumbs.get(p);
@@ -292,12 +404,12 @@ export class Lightbox {
         img.loading = 'lazy';
         img.src = this.thumbFor(im) || thumbUrl(im, 160, opt);
         el.appendChild(img);
-        if (!first) { el.style.transition = 'none'; el.style.transform = `translateX(${o * STRIP_W}px)`; }
+        if (!first) { el.style.transition = 'none'; el.style.transform = `translateX(${o * STRIP_W}px)`; entering = true; }
         this.strip.appendChild(el);
         this.thumbs.set(p, el);
       }
     }
-    void this.strip.offsetWidth;
+    if (entering) void this.strip.offsetWidth;
     for (const [p, el] of this.thumbs) {
       const o = p - this.pos;
       el.style.transition = '';
@@ -309,16 +421,24 @@ export class Lightbox {
 
   // ------------------------------------------------------------ 飞入飞出
 
+  /**
+   * 从格子飞到中间。格子是裁过的（object-fit: cover），框是完整比例：起点用 clip-path 把框裁成格子的样子，
+   * 边飞边展开，看起来就是格子本身被拉出来。只动 transform 和 clip-path。
+   */
   _flip(el, from, to) {
     const s = Math.max(from.width / to.width, from.height / to.height);
     const dx = from.left + from.width / 2 - (to.left + to.width / 2);
     const dy = from.top + from.height / 2 - (to.top + to.height / 2);
-    el.animate(
+    // 框缩放 s 倍后比格子多出来的部分裁掉（单位：框自身的像素）
+    const ix = Math.max(0, (to.width - from.width / s) / 2);
+    const iy = Math.max(0, (to.height - from.height / s) / 2);
+    const r = 6 / s;
+    return el.animate(
       [
-        { transform: `translate(${dx}px,${dy}px) scale(${s})`, borderRadius: '10px', filter: 'brightness(1.15)' },
-        { transform: 'none', borderRadius: '8px', filter: 'none' },
+        { transform: `translate(${dx}px,${dy}px) scale(${s})`, clipPath: `inset(${iy}px ${ix}px round ${r}px)` },
+        { transform: 'none', clipPath: 'inset(0px 0px round 8px)' },
       ],
-      { duration: 460, easing: 'cubic-bezier(.2,.9,.2,1)' },
+      { duration: 420, easing: 'cubic-bezier(.2,.85,.25,1)' },
     );
   }
 
@@ -470,7 +590,8 @@ export class Lightbox {
         const side = hit && hit.closest('.lb-slide.side');
         if (side) { lastTap = 0; return this.step(+side.dataset.p - this.pos); }
         // 单击空白处关闭（点在图上不关，留给双击）
-        if (hit !== this.img && this.z <= 1.01) setTimeout(() => { if (lastTap === now) this.close(); }, 300);
+        const onImg = hit && this.img && this.img.contains(hit);
+        if (!onImg && this.z <= 1.01) setTimeout(() => { if (lastTap === now) this.close(); }, 300);
         return;
       }
       if (this.z > 1.01) return;
@@ -505,7 +626,12 @@ export class Lightbox {
       e.stopImmediatePropagation();
     }, true);
 
-    window.addEventListener('resize', () => { if (this.isOpen) this._sync(0, true); });
+    window.addEventListener('resize', () => {
+      this._vp();
+      if (!this.isOpen) return;
+      for (const s of this.slides.values()) this._sizeBox(s, s.fullImg ? { w: s.fullImg.naturalWidth, h: s.fullImg.naturalHeight } : null);
+      this._sync(0, true);
+    });
   }
 
   _trackTo(x, anim) {

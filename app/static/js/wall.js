@@ -227,10 +227,10 @@ export class Wall {
 
   /** rec 在屏幕上的矩形。 */
   rectOf(rec) {
-    const r = this.stage.getBoundingClientRect();
+    // #stage 是 position: fixed; inset: 0，左上角就是视口原点；不读布局
     return {
-      left: r.left + rec.x * this.z + this.tx,
-      top: r.top + rec.y * this.z + this.ty,
+      left: rec.x * this.z + this.tx,
+      top: rec.y * this.z + this.ty,
       width: rec.w * this.z,
       height: rec.h * this.z,
     };
@@ -263,6 +263,12 @@ export class Wall {
   cachedThumb(im) {
     const hit = this.cache.best(im, this.opt, 99999);
     return hit ? hit.el.src : '';
+  }
+
+  /** 已解码的缩略图元素本身（同一张位图，拿来就能画，不用再解码）。 */
+  cachedThumbEl(im) {
+    const hit = this.cache.best(im, this.opt, 99999);
+    return hit ? hit.el : null;
   }
 
   stats() {

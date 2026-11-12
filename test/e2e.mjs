@@ -117,17 +117,25 @@ await sleep(1000);
 
 // 点块 → 大图
 const pt = await ev(`(() => {
-  const t = [...document.querySelectorAll('.tile')].find((el) => {
+  // 缩到最小时块很小，要求整块都在视口内可能一块都找不到；只看中心点落在中间区域
+  const tiles = [...document.querySelectorAll('.tile.loaded')];
+  const t = tiles.find((el) => {
     const r = el.getBoundingClientRect();
-    return r.left > 200 && r.top > 200 && r.right < innerWidth - 200 && r.bottom < innerHeight - 200;
-  });
+    const cx = r.left + r.width / 2, cy = r.top + r.height / 2;
+    return cx > innerWidth * 0.3 && cx < innerWidth * 0.7 && cy > innerHeight * 0.3 && cy < innerHeight * 0.7;
+  }) || tiles[0];
+  if (!t || !t._rec) return null;
   const r = t.getBoundingClientRect();
   return { x: r.left + r.width / 2, y: r.top + r.height / 2, p: t._rec.im.p };
 })()`);
+if (!pt) { console.log('FAIL 一个块都没找到'); }
 await mouse('mousePressed', pt.x, pt.y);
 await mouse('mouseReleased', pt.x, pt.y);
-await waitFor(`!document.getElementById('lightbox').hidden`, 3000);
-await waitFor(`(() => { const i = document.querySelector('.lb-slide.cur img'); return i && i.src.includes('w=') })()`, 15000);
+await waitFor(`document.getElementById('lightbox').classList.contains('open')`, 3000);
+await waitFor(`(() => { const b = document.querySelector('.lb-slide.cur .lb-box.sharp img.lb-full'); return b && b.src.includes('w=') })()`, 15000);
+// 两侧预览和胶片条在飞入落地后才补上
+await waitFor(`!document.getElementById('lightbox').classList.contains('flying')`, 3000);
+await sleep(200);
 check('两侧有预览', (await ev(`document.querySelectorAll('.lb-slide.side').length`)) >= 2);
 check('胶片条有缩略图', (await ev(`document.querySelectorAll('.lb-th').length`)) > 4);
 await sleep(700);
@@ -139,7 +147,7 @@ await sleep(400);
 check('→ 切到下一张', (await ev(`document.getElementById('lbName').title`)) !== pt.p);
 await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
 await sleep(500);
-check('Esc 关闭大图', await ev(`document.getElementById('lightbox').hidden`));
+check('Esc 关闭大图', await ev(`!document.getElementById('lightbox').classList.contains('open')`));
 
 // 设置：清晰度切到省流 → 请求 s 不超过 320，刷新后保持
 await ev(`document.getElementById('btnSettings').click()`);

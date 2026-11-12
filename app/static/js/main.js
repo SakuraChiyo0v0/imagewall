@@ -91,6 +91,7 @@ const lightbox = new Lightbox({
     return rec ? wall.rectOf(rec) : null;
   },
   thumbFor: (im) => wall.cachedThumb(im),
+  thumbElFor: (im) => wall.cachedThumbEl(im),
   onOpen: () => { wall.setDrift(false); },
   onClose: () => {
     if ($('btnDrift').getAttribute('aria-pressed') === 'true') wall.setDrift(true);

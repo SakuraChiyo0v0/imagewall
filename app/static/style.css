@@ -335,21 +335,41 @@ body.booting .bar { opacity: 0; transform: translateY(-8px) }
 
 /* 打开大图时画布退到背后：缩远、变暗、虚化 */
 #plane { transition: opacity .5s }
-body.lb-on #stage { transform: scale(.94) }
-#stage { transition: transform .6s var(--ease) }
-body.lb-on .bar { opacity: 0; transform: translateY(-10px); pointer-events: none }
+body.lb-on #stage { transform: scale(.96) }
+#stage { transition: transform .5s var(--ease) }
+/* 顶栏、提示条、toast：大图一打开立刻收起（不是淡出，不能压在大图上面） */
+body.lb-open .bar, body.lb-open .hint, body.lb-open .toast {
+  opacity: 0 !important; transform: translateY(-10px); pointer-events: none;
+  transition: none !important;
+}
 
+/* 常驻 DOM、用 visibility 隐藏：打开时不用整页重新排版（手机上那一下就是卡顿）。
+   淡入淡出只作用在背景层上，飞出来的图从第一帧就是实的 */
 .lightbox {
   position: fixed; inset: 0; z-index: 60;
   --lb-bg: 1;
+  visibility: hidden; pointer-events: none;
+  transition: visibility 0s linear .3s;
+  overflow: hidden;
+  contain: layout style size;
+}
+.lightbox.open { visibility: visible; pointer-events: auto; transition: visibility 0s }
+.lightbox::before {
+  content: ""; position: absolute; inset: 0; pointer-events: none;
   background: rgba(5, 6, 9, calc(.72 * var(--lb-bg)));
   opacity: 0; transition: opacity .3s;
-  overflow: hidden;
 }
-.lightbox.open { opacity: 1 }
+.lightbox.open::before { opacity: 1 }
+.lightbox .lb-track { opacity: 0; transition: opacity .25s }
+.lightbox.open .lb-track { opacity: 1 }
+/* 飞入时轨道不做淡入（框本身就是从格子位置出来的） */
+.lightbox.open.flying .lb-track { transition: none }
+.lb-nav, .lb-spin, .lb-err { transition: opacity .25s }
+.lightbox:not(.open) .lb-nav { opacity: 0 !important }
+.lb-slide { contain: layout style }
 
 /* 氛围光：当前图放大、重度模糊，铺满背景 */
-.lb-amb { position: absolute; inset: -12%; pointer-events: none; opacity: calc(var(--lb-bg) * .9) }
+.lb-amb { position: absolute; inset: -12%; pointer-events: none; opacity: calc(var(--lb-bg) * .9); transition: opacity .6s }
 .lb-amb i {
   position: absolute; inset: 0;
   background-size: cover; background-position: center;
@@ -366,25 +386,41 @@ body.lb-on .bar { opacity: 0; transform: translateY(-10px); pointer-events: none
   position: absolute; inset: 0;
   display: grid; place-items: center;
   padding: calc(64px + var(--safe-t)) 0 calc(118px + var(--safe-b));
-  transition: transform .55s var(--ease), opacity .45s, filter .55s var(--ease);
-  will-change: transform;
+  transition: transform .55s var(--ease), opacity .45s;
   pointer-events: none;
 }
-.lb-slide img {
-  max-width: 84vw; max-height: calc(100vh - 182px - var(--safe-t) - var(--safe-b));
-  object-fit: contain; border-radius: 8px;
-  box-shadow: 0 40px 120px rgba(0, 0, 0, .65), 0 0 0 1px rgba(255, 255, 255, .06);
-  user-select: none; -webkit-user-drag: none;
-  opacity: 0; transition: opacity .3s;
+/* 框：大小由 JS 按原图比例一次算好；缩略图垫底、清晰图盖在上面淡入 */
+.lb-box {
+  position: relative;
+  border-radius: 8px; overflow: hidden;
+  background: #0d0f14;
+  box-shadow: 0 30px 90px rgba(0, 0, 0, .6), 0 0 0 1px rgba(255, 255, 255, .06);
   pointer-events: auto;
+  will-change: transform;
 }
-.lb-slide img.ready { opacity: 1 }
-.lb-slide.side { filter: brightness(.55) saturate(.85); cursor: pointer }
-.lb-slide.side img { box-shadow: 0 20px 60px rgba(0, 0, 0, .5) }
-.lb-slide.side:hover { filter: brightness(.75) }
+.lb-box img, .lb-box canvas {
+  position: absolute; inset: 0; width: 100%; height: 100%;
+  object-fit: cover; display: block;
+  user-select: none; -webkit-user-drag: none;
+  opacity: 0;
+}
+.lb-box .lb-thumb { opacity: 1 }
+.lb-box img.ready { opacity: 1 }
+.lb-box img.lb-full { transition: opacity .35s }
+/* 两侧的图用一层半透明黑压暗（不用 filter：filter 每帧都要重画） */
+.lb-box::after {
+  content: ""; position: absolute; inset: 0; pointer-events: none; z-index: 2;
+  background: rgba(5, 6, 9, .5); opacity: 0; transition: opacity .55s var(--ease);
+}
+.lb-slide.side .lb-box::after { opacity: 1 }
+.lb-slide.side { cursor: pointer }
+.lb-slide.side .lb-box { box-shadow: 0 20px 60px rgba(0, 0, 0, .5) }
+/* 飞入期间：氛围光和胶片条先不出，顶栏底栏晚一点出，GPU 只忙一件事 */
+.lightbox.flying .lb-amb, .lightbox.flying .lb-strip { opacity: 0 }
+.lightbox.flying .lb-bar, .lightbox.flying .lb-top { transition-delay: .32s }
 .lb-slide.gone { opacity: 0 }
 /* 播放时的缓慢推镜 */
-.lb-slide img.kb { animation: kb 5.4s linear both }
+.lb-box.kb { animation: kb 5.4s linear both }
 @keyframes kb { from { transform: scale(1) } to { transform: scale(1.07) translate(var(--kb-x, 0), var(--kb-y, 0)) } }
 
 .lb-spin {
@@ -439,14 +475,18 @@ body.lb-on .bar { opacity: 0; transform: translateY(-10px); pointer-events: none
   transition: transform .5s var(--ease) .1s, opacity .3s .1s;
 }
 .lightbox.open .lb-bar { transform: none; opacity: 1 }
-.lb-meta { text-align: center; max-width: min(90vw, 760px); min-width: 0 }
-.lb-meta b { display: block; font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
+.lb-meta { text-align: center; width: min(90vw, 760px); min-width: 0; min-height: 36px }
+/* 文件名一行、宽度固定：它重新排版时不会牵连整个底栏（手机上中文排版一次要几十毫秒） */
+.lb-meta b { display: block; font-size: 13px; font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; contain: layout paint; height: 20px }
+.lb-info { contain: layout paint; height: 16px; overflow: hidden }
+.lightbox:not(.open) .lb-meta { visibility: hidden }
 .lb-info { display: flex; justify-content: center; gap: 12px; flex-wrap: wrap; color: var(--mut); font-size: 11.5px; margin-top: 1px }
 .lb-info span:first-child { max-width: 46vw; white-space: nowrap; overflow: hidden; text-overflow: ellipsis }
 
 /* 胶片条：当前图居中，两侧渐隐 */
 .lb-strip {
   position: relative; width: min(100%, 860px); height: 52px;
+  transition: opacity .3s;
   -webkit-mask-image: linear-gradient(90deg, transparent, #000 18%, #000 82%, transparent);
   mask-image: linear-gradient(90deg, transparent, #000 18%, #000 82%, transparent);
 }
@@ -502,7 +542,7 @@ html.calm .tile::before { display: none }
   .lb-bar { padding: 8px 10px calc(10px + var(--safe-b)) }
   .lb-info span:first-child { display: none }
   .lb-slide { padding: calc(56px + var(--safe-t)) 0 calc(108px + var(--safe-b)) }
-  .lb-slide img { max-width: 96vw; max-height: calc(100vh - 164px - var(--safe-t) - var(--safe-b)) }
+  /* 手机上的大图尺寸由 JS 按屏幕算 */
 }
 
 body.lb-on .toast { opacity: 0 }
