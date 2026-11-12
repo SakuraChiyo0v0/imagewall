@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#08090c">
+<meta name="color-scheme" content="dark">
+<title>图片墙</title>
+<link rel="icon" href="static/icon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="static/style.css">
+<link rel="modulepreload" href="static/js/main.js">
+</head>
+<body class="booting">
+<div id="stage" aria-label="图片墙画布"><div id="plane"></div></div>
+<div class="vignette" aria-hidden="true"></div>
+
+<header class="bar top">
+  <button class="chip path" id="btnFolder" title="选择文件夹（F）">
+    <svg class="i" viewBox="0 0 24 24"><path d="M3 7.2A2.2 2.2 0 0 1 5.2 5h3.6c.6 0 1.1.3 1.5.7l1 1.3h7.5A2.2 2.2 0 0 1 21 9.2v8.6a2.2 2.2 0 0 1-2.2 2.2H5.2A2.2 2.2 0 0 1 3 17.8z"/></svg>
+    <span class="crumb" id="pathText">选择文件夹</span>
+    <span class="count" id="countText"></span>
+    <svg class="i caret" viewBox="0 0 24 24"><path d="m7 10 5 5 5-5"/></svg>
+  </button>
+  <div class="spacer"></div>
+  <div class="chip group">
+    <button class="ib" id="btnShuffle" title="换一批（R）">
+      <svg class="i" viewBox="0 0 24 24"><path d="M16 3h5v5"/><path d="M4 20 21 3"/><path d="M21 16v5h-5"/><path d="m15 15 6 6"/><path d="M4 4l5 5"/></svg>
+    </button>
+    <button class="ib" id="btnDrift" title="漫游（D）" aria-pressed="false">
+      <svg class="i" viewBox="0 0 24 24"><path d="M5 19c4-1 6-3 7-7s3-6 7-7"/><circle cx="5" cy="19" r="1.6"/><circle cx="19" cy="5" r="1.6"/></svg>
+    </button>
+    <span class="sep"></span>
+    <button class="ib" id="btnZoomOut" title="缩小（-）"><svg class="i" viewBox="0 0 24 24"><path d="M6 12h12"/></svg></button>
+    <button class="zoomv mono" id="zoomText" title="恢复 100%（0）">100%</button>
+    <button class="ib" id="btnZoomIn" title="放大（+）"><svg class="i" viewBox="0 0 24 24"><path d="M6 12h12M12 6v12"/></svg></button>
+    <span class="sep"></span>
+    <button class="ib" id="btnSettings" title="设置（S）">
+      <svg class="i" viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg>
+    </button>
+  </div>
+</header>
+
+<div id="hint" class="hint">
+  <span><kbd>拖动</kbd>浏览</span><span><kbd>滚轮</kbd>平移</span><span><kbd>Ctrl</kbd>+滚轮 / 双指 缩放</span><span><kbd>点击</kbd>看大图</span>
+</div>
+
+<div class="loader" id="loader" hidden><i></i><span id="loaderText">载入中</span></div>
+<div class="empty" id="empty" hidden><b>这里没有图片</b><span>换一个文件夹试试</span></div>
+
+<!-- 遮罩：点空白处关面板 -->
+<div class="scrim" id="scrim" hidden></div>
+
+<!-- 文件夹 -->
+<section class="sheet" id="folderSheet" hidden aria-label="选择文件夹">
+  <div class="sheet-head">
+    <div class="crumbs" id="fCrumbs"></div>
+    <button class="ib x" data-close title="关闭"><svg class="i" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+  </div>
+  <div class="filter"><input id="fFilter" type="search" placeholder="筛选子文件夹" autocomplete="off" spellcheck="false"></div>
+  <div class="list" id="fList"></div>
+  <div class="sheet-foot">
+    <span class="tip" id="fInfo"></span>
+    <button class="primary" id="fOpen">打开这个文件夹</button>
+  </div>
+</section>
+
+<!-- 设置 -->
+<section class="sheet right" id="settingsSheet" hidden aria-label="显示设置">
+  <div class="sheet-head"><b>显示设置</b>
+    <button class="ib x" data-close title="关闭"><svg class="i" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+  </div>
+  <div class="sheet-body">
+    <div class="field">
+      <label>清晰度</label>
+      <div class="seg" id="segDetail">
+        <button data-v="low">省流</button><button data-v="mid">标准</button><button data-v="high">高清</button><button data-v="max">极致</button>
+      </div>
+      <p class="tip" id="detailTip">按格子在屏幕上的实际像素取图，放大时自动换清晰的。外网建议「省流」。</p>
+    </div>
+    <div class="field">
+      <label>画质</label>
+      <div class="seg" id="segQ">
+        <button data-v="60">60</button><button data-v="75">75</button><button data-v="78">78</button><button data-v="85">85</button><button data-v="95">95</button>
+      </div>
+    </div>
+    <div class="field">
+      <label>格式</label>
+      <div class="seg" id="segFmt">
+        <button data-v="auto">自动</button><button data-v="jpeg">JPEG</button><button data-v="webp">WebP</button>
+      </div>
+      <p class="tip">WebP 同画质小约 30%，省流量；首次生成稍慢。</p>
+    </div>
+    <div class="field">
+      <label>格子大小</label>
+      <div class="seg" id="segCell">
+        <button data-v="200">小</button><button data-v="280">中</button><button data-v="360">大</button><button data-v="460">特大</button>
+      </div>
+    </div>
+    <div class="field">
+      <label>间距</label>
+      <div class="seg" id="segGap">
+        <button data-v="0">无</button><button data-v="4">细</button><button data-v="10">宽</button>
+      </div>
+    </div>
+    <div class="field row"><label for="tgNames">显示文件名</label><button class="toggle" id="tgNames" role="switch"><span></span></button></div>
+    <div class="field row"><label for="tgMotion">动效</label><button class="toggle" id="tgMotion" role="switch"><span></span></button></div>
+    <div class="field">
+      <label>预生成缩略图</label>
+      <p class="tip">按当前设置把整个文件夹跑一遍，之后打开就快。有人在看图时会自动让路。</p>
+      <div class="warm">
+        <button class="ghost" id="btnWarm">开始</button>
+        <span class="bar-track"><i id="warmBar"></i></span>
+        <span id="warmText" class="mono"></span>
+      </div>
+    </div>
+    <div class="field row">
+      <span class="tip" id="cacheText">缓存 —</span>
+      <button class="ghost small" id="btnReload">重新扫描</button>
+    </div>
+  </div>
+</section>
+
+<!-- 大图 -->
+<div class="lightbox" id="lightbox" hidden>
+  <div class="lb-stage" id="lbStage"><img id="lbImg" alt="" draggable="false"></div>
+  <div class="lb-spin"></div>
+  <div class="lb-err" id="lbErr" hidden>这张图读不出来</div>
+  <button class="lb-nav prev" id="lbPrev" title="上一张（←）"><svg class="i" viewBox="0 0 24 24"><path d="m15 5-7 7 7 7"/></svg></button>
+  <button class="lb-nav next" id="lbNext" title="下一张（→）"><svg class="i" viewBox="0 0 24 24"><path d="m9 5 7 7-7 7"/></svg></button>
+  <div class="lb-bar">
+    <div class="lb-meta"><b id="lbName"></b><div id="lbInfo" class="lb-info"></div></div>
+    <a id="lbRaw" class="ghost" href="#" target="_blank" rel="noopener">原图</a>
+    <button class="ib x" data-close title="关闭（Esc）"><svg class="i" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18"/></svg></button>
+  </div>
+</div>
+
+<div id="toast" class="toast" role="status"></div>
+
+<script type="module" src="static/js/main.js"></script>
+</body>
+</html>
