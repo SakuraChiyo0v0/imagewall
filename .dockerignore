@@ -1,0 +1,9 @@
+.git
+.github
+docs
+test
+tools
+*.png
+*.jpg
+**/__pycache__
+node_modules

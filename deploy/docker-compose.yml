@@ -1,0 +1,37 @@
+# imagewall 部署。放在 <部署根>/imagewall/docker-compose.yml，同目录：
+#
+#   cache/   缩略图缓存。可以整个删掉，会按需重新生成（受 IMG_CACHE_MAX_MB 限制）
+#   state/   要长期保留的数据：图片尺寸 dims.json，以后还有颜色等。备份这个目录
+#
+# 首次部署：
+#   mkdir -p cache state && chown 1000:1000 cache state   # 容器以 uid 1000 运行
+#   docker compose pull && docker compose up -d
+#
+# 升级：docker compose pull && docker compose up -d
+# 回退：把 image 改成 ghcr.io/sakurachiyo0v0/imagewall:1.2 这类具体版本，再 up -d
+services:
+  imagewall:
+    image: ghcr.io/sakurachiyo0v0/imagewall:latest
+    container_name: imagewall
+    restart: unless-stopped
+    # host 网络：局域网和反代直接访问 8899，不用发布端口
+    network_mode: host
+    mem_limit: 1200m
+    environment:
+      TZ: Asia/Shanghai
+      IMG_DATA_ROOT: /data
+      # 冒号分隔，都是 IMG_DATA_ROOT 下的目录
+      IMG_ROOTS: "图片:漫画:素材"
+      IMG_CACHE: /cache
+      IMG_STATE: /state
+      IMG_PORT: "8899"
+      # IMG_CACHE_MAX_MB: "8192"
+      # IMG_WORKERS: "4"
+    volumes:
+      # 图片只读：容器碰不到原图
+      - /volume1:/data:ro
+      - ./cache:/cache
+      - ./state:/state
+    labels:
+      # 装了 watchtower 时：ghcr 上 :latest 一变就自动拉新的。没装时这个标签不起作用，手动 pull 即可
+      - com.centurylinklabs.watchtower.enable=true

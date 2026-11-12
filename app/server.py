@@ -27,7 +27,7 @@ from urllib.parse import parse_qs, quote, urlparse
 
 from PIL import Image, ImageOps, features
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 
 
 def _env_int(name: str, default: int) -> int:
@@ -39,6 +39,9 @@ def _env_int(name: str, default: int) -> int:
 
 DATA_ROOT = os.path.realpath(os.environ.get("IMG_DATA_ROOT", "/data"))
 CACHE_DIR = os.path.realpath(os.environ.get("IMG_CACHE", "/cache"))
+# 需要长期保留的数据（图片尺寸，以后还有颜色等）。和缩略图缓存分开：缓存随时能删、能重新生成，这里不行。
+# 不设时退回缓存目录，兼容旧部署。
+STATE_DIR = os.path.realpath(os.environ.get("IMG_STATE", "") or CACHE_DIR)
 ROOTS = [r.strip("/ ") for r in os.environ.get("IMG_ROOTS", "图片:漫画:素材").split(":") if r.strip("/ ")]
 ROOTS_REAL = [os.path.realpath(os.path.join(DATA_ROOT, r)) for r in ROOTS]
 SCAN_TTL = _env_int("IMG_SCAN_TTL", 60)
@@ -104,7 +107,7 @@ def is_root(rel: str) -> bool:
 # ---------------------------------------------------------------- 目录清单
 
 class Dims:
-    """图片宽高：后台只读文件头（不解码像素），持久化到缓存目录的 dims.json。
+    """图片宽高：后台只读文件头（不解码像素），持久化到数据目录的 dims.json。
 
     扫描时不读尺寸（1.2 万张会从 1 秒变成几十秒）；清单先发出去，尺寸在后台慢慢补，
     补完的下一次打开就能按横竖图分配格子形状。读不出来的记 (0, 0)，不再重试。
@@ -113,7 +116,7 @@ class Dims:
     SAVE_EVERY = 500
 
     def __init__(self):
-        self.path = os.path.join(CACHE_DIR, "dims.json")
+        self.path = os.path.join(STATE_DIR, "dims.json")
         self.lock = threading.Lock()
         self.map: dict[str, list] = {}
         self.queue: list = []
@@ -127,6 +130,16 @@ class Dims:
         return hashlib.sha1(f"{rel}|{mtime}|{size}".encode()).hexdigest()[:16]
 
     def load(self) -> None:
+        # 从旧位置（缓存目录）搬过来：只在新位置还没有时搬，搬完旧的留着不动
+        old = os.path.join(CACHE_DIR, "dims.json")
+        if self.path != old and not os.path.exists(self.path) and os.path.exists(old):
+            try:
+                with open(old, "rb") as src, open(self.path + ".tmp", "wb") as dst:
+                    dst.write(src.read())
+                os.replace(self.path + ".tmp", self.path)
+                print(f"[wall] dims.json 从 {old} 迁到 {self.path}", flush=True)
+            except OSError as e:
+                print(f"[wall] 迁移 dims.json 失败：{e}", flush=True)
         try:
             with open(self.path, encoding="utf-8") as f:
                 d = json.load(f)
@@ -963,6 +976,8 @@ def main() -> None:
     ap.add_argument("--host", default=os.environ.get("IMG_HOST", "0.0.0.0"))
     a = ap.parse_args()
     os.makedirs(CACHE_DIR, exist_ok=True)
+    os.makedirs(STATE_DIR, exist_ok=True)
+    print(f"[wall] cache={CACHE_DIR} state={STATE_DIR}", flush=True)
     for r, real in zip(ROOTS, ROOTS_REAL):
         print(f"[wall] root {r} -> {real} exists={os.path.isdir(real)}", flush=True)
     threading.Thread(target=JANITOR.run, daemon=True).start()

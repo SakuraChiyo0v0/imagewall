@@ -45,6 +45,14 @@
 `query` 必须是纯的：同一份清单、同一个种子、同一个矩形，永远吐出同样的块和图。`model` 里有每张图的宽高比（`aspect`）
 和分类（`cls`），见 `layout/model.js`。
 
+## 部署
+
+```bash
+docker compose -f deploy/docker-compose.yml up -d
+```
+
+镜像 `ghcr.io/sakurachiyo0v0/imagewall`，目录与升级见 [docs/部署.md](docs/部署.md)。
+
 ## 运行
 
 ```bash

@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.3.0 — 2026-11-12
+
+### 部署
+- 有了自己的镜像 `ghcr.io/sakurachiyo0v0/imagewall`：Python 3.12 + Pillow，代码打进镜像，以 uid 1000 运行，带健康检查
+- GitHub Actions 推到 main 发 `latest`，打 `v*` 标签发版本号标签；构建前先跑单元测试
+- `deploy/docker-compose.yml`：独立的 compose 项目，图片只读挂载
+- 数据分两个目录：`cache/` 放缩略图（可删、可重新生成），新增 `state/`（`IMG_STATE`）放要长期保留的数据。
+  `dims.json` 从缓存目录挪到这里，第一次启动自动复制过去，旧文件保留
+
+
 ## 1.2.0 — 2026-11-12
 
 手机外网实测反馈：首屏长时间黑块、设置面板花屏、电脑上也偶有闪。

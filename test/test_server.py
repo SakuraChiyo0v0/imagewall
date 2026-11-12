@@ -34,10 +34,11 @@ class ServerTest(unittest.TestCase):
         cls.tmp = tempfile.mkdtemp(prefix="imagewall-test-")
         cls.data = os.path.join(cls.tmp, "data")
         cls.cache = os.path.join(cls.tmp, "cache")
+        cls.state = os.path.join(cls.tmp, "state")
         subprocess.run([sys.executable, os.path.join(ROOT, "tools", "make_fixtures.py"), cls.data, "60"],
                        check=True, capture_output=True)
         cls.port = free_port()
-        env = dict(os.environ, IMG_DATA_ROOT=cls.data, IMG_ROOTS="图片:漫画:素材", IMG_CACHE=cls.cache,
+        env = dict(os.environ, IMG_DATA_ROOT=cls.data, IMG_ROOTS="图片:漫画:素材", IMG_CACHE=cls.cache, IMG_STATE=cls.state,
                    IMG_CACHE_MAX_MB="0", PYTHONIOENCODING="utf-8")
         cls.proc = subprocess.Popen([sys.executable, os.path.join(ROOT, "app", "server.py"),
                                      "--host", "127.0.0.1", "--port", str(cls.port)],
@@ -227,7 +228,37 @@ class ServerTest(unittest.TestCase):
         for di, n, _t, _s, a in d["files"]:
             with Image.open(os.path.join(self.data, d["dirs"][di], n)) as im:
                 self.assertEqual(a, round(im.size[0] * 100 / im.size[1]), n)
-        self.assertTrue(os.path.exists(os.path.join(self.cache, "dims.json")))
+        # 尺寸是要长期保留的数据，存在数据目录，不进缩略图缓存目录
+        self.assertTrue(os.path.exists(os.path.join(self.state, "dims.json")))
+        self.assertFalse(os.path.exists(os.path.join(self.cache, "dims.json")))
+
+    def test_dims_migrates_from_cache(self):
+        """旧部署的 dims.json 在缓存目录：新版第一次启动要搬到数据目录，旧文件保留。"""
+        tmp = tempfile.mkdtemp(prefix="imagewall-mig-")
+        try:
+            cache, state = os.path.join(tmp, "cache"), os.path.join(tmp, "state")
+            os.makedirs(cache)
+            with open(os.path.join(cache, "dims.json"), "w", encoding="utf-8") as f:
+                json.dump({"abc": [4, 3]}, f)
+            port = free_port()
+            env = dict(os.environ, IMG_DATA_ROOT=self.data, IMG_ROOTS="图片", IMG_CACHE=cache, IMG_STATE=state,
+                       PYTHONIOENCODING="utf-8")
+            p = subprocess.Popen([sys.executable, os.path.join(ROOT, "app", "server.py"),
+                                  "--host", "127.0.0.1", "--port", str(port)],
+                                 env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+            try:
+                for _ in range(100):
+                    if os.path.exists(os.path.join(state, "dims.json")):
+                        break
+                    time.sleep(0.1)
+                with open(os.path.join(state, "dims.json"), encoding="utf-8") as f:
+                    self.assertEqual(json.load(f).get("abc"), [4, 3])
+                self.assertTrue(os.path.exists(os.path.join(cache, "dims.json")))
+            finally:
+                p.terminate()
+                p.wait(5)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
     def test_404_and_400(self):
         self.assertEqual(self.get("/api/nope")[0], 404)
