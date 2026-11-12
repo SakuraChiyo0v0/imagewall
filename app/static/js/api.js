@@ -25,8 +25,8 @@ export const api = {
   warmStatus: () => getJSON('api/warm/status'),
 
   /** 目录清单。服务端发紧凑格式 {dirs, files:[[目录序号, 文件名, mtime, 字节]]}，这里展开。 */
-  async images(path, { refresh = false, signal } = {}) {
-    const d = await getJSON('api/images?' + q({ path, refresh: refresh ? 1 : '' }), {
+  async images(path, { refresh = false, head = false, signal } = {}) {
+    const d = await getJSON('api/images?' + q({ path, refresh: refresh ? 1 : '', head: head ? 1 : '' }), {
       signal,
       cache: refresh ? 'reload' : 'no-cache',
     });

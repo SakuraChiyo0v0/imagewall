@@ -27,7 +27,7 @@ from urllib.parse import parse_qs, quote, urlparse
 
 from PIL import Image, ImageOps, features
 
-VERSION = "1.1.0"
+VERSION = "1.2.0"
 
 
 def _env_int(name: str, default: int) -> int:
@@ -224,7 +224,7 @@ class Listing:
     尺寸后台补到一定量后（DIMS.version 变了）只重新编码，不重扫目录。
     """
 
-    __slots__ = ("rel", "entries", "ts", "body", "gz", "etag", "_dir_counts", "dv", "missing")
+    __slots__ = ("rel", "entries", "ts", "body", "gz", "etag", "_dir_counts", "dv", "missing", "_head")
 
     def __init__(self, rel: str, entries: list, ts: float):
         self.rel = rel
@@ -248,8 +248,18 @@ class Listing:
             ensure_ascii=False, separators=(",", ":"),
         ).encode()
         self.gz = gzip.compress(self.body, 6)
+        self._head = None
         self.etag = '"L' + hashlib.sha1(self.body).hexdigest()[:20] + '"'
         self._dir_counts = None
+
+    HEAD_N = 400
+
+    def head(self):
+        """前 HEAD_N 张的小清单（外网先拿它铺首屏，完整清单随后到）。"""
+        if self._head is None:
+            self._head = Listing(self.rel, self.entries[: self.HEAD_N], self.ts)
+            self._head._head = self._head
+        return self._head
 
     def dir_counts(self) -> dict:
         if self._dir_counts is None:
@@ -776,8 +786,10 @@ class Handler(BaseHTTPRequestHandler):
         body = json.dumps(obj, ensure_ascii=False, separators=(",", ":")).encode()
         self._send(code, "application/json; charset=utf-8", body, {"Cache-Control": "no-store"})
 
-    def send_listing(self, lst: Listing) -> None:
+    def send_listing(self, lst: Listing, total: int = 0) -> None:
         h = {"Cache-Control": "no-cache", "ETag": lst.etag, "Vary": "Accept-Encoding"}
+        if total:
+            h["X-Total"] = str(total)
         if self._not_modified(lst.etag, {"Cache-Control": "no-cache"}):
             return
         if self._gzip_ok():
@@ -870,7 +882,10 @@ class Handler(BaseHTTPRequestHandler):
 
             if path == "/api/images":
                 rel = rel_of(resolve(arg("path")))
-                return self.send_listing(LIB.get(rel, force=arg("refresh") == "1"))
+                lst = LIB.get(rel, force=arg("refresh") == "1")
+                if arg("head") == "1" and len(lst.entries) > Listing.HEAD_N:
+                    return self.send_listing(lst.head(), total=len(lst.entries))
+                return self.send_listing(lst)
 
             if path == "/api/img":
                 return self.serve_img(arg("p"), qs)

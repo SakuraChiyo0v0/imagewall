@@ -13,19 +13,23 @@ const VIEW_KEY = 'wall.view.v1';
 // ------------------------------------------------------------ 画布
 
 let movingTimer = 0;
+let lastZoomText = '';
 const wall = new Wall($('stage'), $('plane'), {
   onOpen: (rec) => lightbox.open(rec.im, rec),
   onInteract: () => {
     hideHint();
-    document.body.classList.add('moving');
+    // 加在 <html> 上：样式里只有顶栏和提示条用到它，不会牵连上百个块重新计算样式
+    if (!movingTimer) document.documentElement.classList.add('moving');
     clearTimeout(movingTimer);
-    movingTimer = setTimeout(() => document.body.classList.remove('moving'), 700);
+    movingTimer = setTimeout(() => { document.documentElement.classList.remove('moving'); movingTimer = 0; }, 700);
   },
   onNet: (fast) => {
     if (!fast) toast('网络较慢：先显示小图，停下后再换清晰的', 3200);
   },
   onView: () => {
-    $('zoomText').textContent = Math.round(wall.z * 100) + '%';
+    // 每帧都会调到这里：文字没变就别碰 DOM（重设 textContent 会让顶栏整块重新排版重绘）
+    const zt = Math.round(wall.z * 100) + '%';
+    if (zt !== lastZoomText) { lastZoomText = zt; $('zoomText').textContent = zt; }
     saveViewSoon();
   },
 });
@@ -115,9 +119,17 @@ async function loadFolder(path, { refresh = false, keepView = false } = {}) {
   const loaderT = setTimeout(() => { if (token === state.loadToken) $('loader').hidden = false; }, 250);
   if (!keepView && state.images.length && S.motion) plane.classList.add('leave');
 
-  let data;
+  // 外网下完整清单要好几秒：同时请求「前 400 张」的小清单，先用它铺满首屏。
+  // 完整清单到了再整体换上（只会多出图，已经在屏幕上的块原样保留，不重建）
+  let data, partial = false;
+  const full = api.images(path, { refresh }).then((d) => ({ d, full: true }));
+  const head = refresh ? null : api.images(path, { head: true }).then((d) => ({ d, full: false }), () => null);
   try {
-    data = await api.images(path, { refresh });
+    let first = head ? await Promise.race([full, head.then((h) => h || full)]) : await full;
+    // 小文件夹的 head 就是完整清单（服务端没截断），当完整的用
+    if (!first.full && first.d.images.length < 400) first = { d: first.d, full: true };
+    data = first.d;
+    partial = !first.full;
   } catch (e) {
     if (token !== state.loadToken) return;
     clearTimeout(loaderT);
@@ -148,6 +160,17 @@ async function loadFolder(path, { refresh = false, keepView = false } = {}) {
     }
   } else {
     wall.setImages(state.images, state.seed);
+  }
+  if (partial) {
+    full.then(({ d }) => {
+      if (token !== state.loadToken) return;
+      state.images = d.images;
+      $('countText').textContent = fmtCount(d.images.length) + ' 张';
+      wall.extendImages(d.images);
+      maybeAutoWarm();
+      if (d.missing) prefetchDims(path, token);
+    }).catch(() => {});
+    return;
   }
   maybeAutoWarm();
   if (data.missing) prefetchDims(path, token);
@@ -316,6 +339,7 @@ function paintSeg(id, val) {
   let pill = seg.querySelector('.pill');
   if (!pill) { pill = document.createElement('i'); pill.className = 'pill'; seg.prepend(pill); }
   if (on) {
+    // 宽度直接设（不做动画），位置用 transform 过渡：切换时只挪层、不重绘
     pill.style.width = on.offsetWidth + 'px';
     pill.style.transform = `translateX(${on.offsetLeft}px)`;
   }

@@ -103,6 +103,37 @@ export class Wall {
     this._rebuild();
   }
 
+  /**
+   * 换成更长的清单（前缀不变）：已在屏幕上的块原样保留、不重建，之后新出现的块按完整清单选图。
+   * 停手后（或下次换批 / 换形式时）整面墙会自然按完整清单排。
+   */
+  extendImages(images) {
+    this.images = images;
+    this.model = buildModel(images, this.seed);
+    this.layout = getLayout(this.layoutId).create(this.model);
+    // 新布局下同一位置可能是另一张图、另一种形状。旧块全部换成新块，但新块的图来自内存缓存
+    // （首屏的图都已下好），拿不到缓存的就先保留旧块，等新块的图到了再撤：画面不会空一下。
+    this._swap = new Map(this.tiles);
+    this.tiles = new Map();
+    this.queue.clear();
+    this.invalidate();
+  }
+
+  /** 换清单时：新块有图了，把它下面压着的旧块撤掉。 */
+  _settleSwap() {
+    if (!this._swap) return;
+    let left = 0;
+    for (const [key, old] of this._swap) {
+      let covered = true;
+      for (const rec of this.tiles.values()) {
+        if (rec.img || rec.el.classList.contains('err')) continue;
+        if (rec.x < old.x + old.w && rec.x + rec.w > old.x && rec.y < old.y + old.h && rec.y + rec.h > old.y) { covered = false; break; }
+      }
+      if (covered) { this._swap.delete(key); this._release(old); } else left++;
+    }
+    if (!left) this._swap = null;
+  }
+
   setSeed(seed) {
     this.seed = seed;
     this._rebuild();
@@ -188,6 +219,7 @@ export class Wall {
   invalidate() { this.dirty = true; this.kick(); }
 
   clear() {
+    if (this._swap) { for (const rec of this._swap.values()) this._release(rec); this._swap = null; }
     for (const rec of this.tiles.values()) this._release(rec);
     this.tiles.clear();
     this.queue.clear();
@@ -338,7 +370,12 @@ export class Wall {
       }
       rec.gen = gen;
     });
-    if (frag.childNodes.length) this.plane.appendChild(frag);
+    if (frag.childNodes.length) {
+      // 换清单期间：新块先插在旧块下面，旧块挡着，等新块出图再撤旧块
+      if (this._swap && this.plane.firstChild) this.plane.insertBefore(frag, this.plane.firstChild);
+      else this.plane.appendChild(frag);
+    }
+    if (this._swap) this._settleSwap();
 
     const kx0 = x0 - keep, ky0 = y0 - keep, kx1 = x1 + keep, ky1 = y1 + keep;
     for (const [key, rec] of this.tiles) {
@@ -398,6 +435,7 @@ export class Wall {
 
   _release(rec) {
     this.queue.delete(rec);
+    if (this.hotEl === rec.el) this._hot(null);
     if (rec.loader) {
       rec.loader.onload = rec.loader.onerror = null;
       // 已经开始下载的不取消：多半马上就到，进 LRU 下次直接用；还没开始的才中止
@@ -482,7 +520,8 @@ export class Wall {
       (ld.decode ? ld.decode() : Promise.resolve()).catch(() => {}).then(() => {
         this.cache.put(im, px, opt, ld);
         if (!done()) return;
-        this._attach(rec, ld, px, !rec.img && this.motion);
+        this._attach(rec, ld, px, !rec.img && this.motion && !this._swap);
+        if (this._swap) this._settleSwap();
         this._pump();
       });
     };
@@ -507,12 +546,20 @@ export class Wall {
       void img.offsetWidth; // 先让 .in 生效一次，过渡才有起点
       img.classList.replace('in', 'on');
     } else if (prev) {
-      // 升级：新图在上层淡入，旧图在下面垫着，淡入完再移除
+      // 升级：新图在上层淡入，旧图在下面垫着；新图的过渡真正结束后才移除旧图。
+      // 中途又来一次升级时，上一张「新图」也只是变成垫底的旧图，同样等最新那张淡入完才一起移除。
       img.classList.add('up');
       rec.el.insertBefore(img, rec.el._name);
       void img.offsetWidth;
       img.classList.add('on');
-      setTimeout(() => { if (prev !== rec.img) prev.remove(); }, 400);
+      const drop = () => {
+        if (rec.img !== img) return;
+        for (const o of rec.el.querySelectorAll('img')) if (o !== img) o.remove();
+        img.classList.remove('up');
+        img.classList.add('now');
+      };
+      img.addEventListener('transitionend', drop, { once: true });
+      setTimeout(drop, 700); // 关了动效或标签页在后台时 transitionend 不来
     } else {
       img.classList.add('on', 'now');
       rec.el.insertBefore(img, rec.el._name);
@@ -535,6 +582,18 @@ export class Wall {
       this.maxLoads = fast ? 8 : 4;
       this.hooks.onNet && this.hooks.onNet(fast);
     }
+  }
+
+  _hotAt(x, y) {
+    const hit = document.elementFromPoint(x, y);
+    this._hot(hit && hit.closest('.tile'));
+  }
+
+  _hot(el) {
+    if (el === this.hotEl) return;
+    if (this.hotEl) this.hotEl.classList.remove('hot');
+    this.hotEl = el;
+    if (el) el.classList.add('hot');
   }
 
   // ------------------------------------------------------------ 输入
@@ -574,7 +633,11 @@ export class Wall {
     });
 
     st.addEventListener('pointermove', (e) => {
-      if (!this.pointers.has(e.pointerId)) return;
+      if (!this.pointers.has(e.pointerId)) {
+        // 鼠标悬停：只给指针下那一块加 .hot
+        if (e.pointerType === 'mouse' && !this.vx && !this.vy) this._hotAt(e.clientX, e.clientY);
+        return;
+      }
       this.pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
       this._touch();
       if (this.pointers.size >= 2 && pinch) {
@@ -592,10 +655,12 @@ export class Wall {
       if (drag && this.pointers.size === 1) {
         const dx = e.clientX - drag.px, dy = e.clientY - drag.py;
         moved = Math.max(moved, Math.abs(dx) + Math.abs(dy));
-        if (moved >= 8) {
+        if (moved >= 8 && !this.dragging) {
+          this.dragging = true;
           st.classList.add('dragging');
-          this.hooks.onInteract && this.hooks.onInteract();
+          this._hot(null);
         }
+        if (moved >= 8) this.hooks.onInteract && this.hooks.onInteract();
         this.tx = drag.tx + dx;
         this.ty = drag.ty + dy;
         sample(e.clientX, e.clientY);
@@ -608,7 +673,7 @@ export class Wall {
       const single = this.pointers.size === 1;
       this.pointers.delete(e.pointerId);
       if (this.pointers.size === 0) {
-        st.classList.remove('dragging');
+        if (this.dragging) { this.dragging = false; st.classList.remove('dragging'); }
         drag = null; pinch = null;
         if (single && moved < 8 && e.type === 'pointerup' && performance.now() - downT < 600) {
           // setPointerCapture 后 click 的 target 是 stage，必须按坐标找块
@@ -638,6 +703,7 @@ export class Wall {
         pinch = null;
       }
     };
+    st.addEventListener('pointerleave', () => this._hot(null));
     st.addEventListener('pointerup', end);
     st.addEventListener('pointercancel', end);
 
