@@ -164,8 +164,16 @@ export class Wall {
     this.layout = getLayout(this.layoutId).create(this.model);
     this.clear();
     this.invalidate();
-    if (this.layoutId === 'mosaic' && !this.layout.bounded) {
-      this.hooks.onMosaicEmpty && this.hooks.onMosaicEmpty();
+    if (this.layoutId === 'mosaic') {
+      if (!this.layout.bounded) {
+        this.hooks.onMosaicEmpty && this.hooks.onMosaicEmpty();
+      } else if (!this.mosaicFitted) {
+        // 第一次进马赛克（含刷新后直接进）：把整幅画装进视口，否则手机上只能看到几格
+        this.mosaicFitted = true;
+        requestAnimationFrame(() => this.fitBounded());
+      }
+    } else {
+      this.mosaicFitted = false;
     }
   }
 
@@ -179,7 +187,10 @@ export class Wall {
   setTarget(pixels, index) {
     this.targetPixels = pixels;
     if (index != null) this.mosaicTarget = index;
-    if (this.layoutId === 'mosaic') this._rebuild();
+    if (this.layoutId === 'mosaic') {
+      this.mosaicFitted = false; // 换了目标图，格子数会变，重新适配一次
+      this._rebuild();
+    }
   }
 
   /** 换一张目标图（同一次「换一批」）。 */

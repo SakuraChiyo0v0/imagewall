@@ -398,17 +398,46 @@ async function ensureMosaic() {
     }
   }
   if (!wall.targetPixels) {
-    // 第一次进马赛克：挑一张适合当目标的（横图），而不是清单第一张
+    // 第一次进马赛克：挑一张「宽高比合适、并且内容不空白」的当目标
     if (!wall.mosaicPicked) {
       wall.mosaicPicked = true;
-      wall.mosaicTarget = wall.pickTarget(wall.mosaicTarget);
+      wall.mosaicTarget = await pickUsableTarget(wall.mosaicTarget);
     }
     await loadTargetPixels(wall.mosaicTarget);
   }
 }
 
-/** 把一张图缩成小图、读出像素，作为马赛克的目标。 */
-function loadTargetPixels(index) {
+/** 这张图适不适合当马赛克目标：大片留白的（纯白线稿、文字页）拼出来是一片白。 */
+function targetUsable(rgba, w, h) {
+  if (!rgba) return false;
+  let light = 0, total = 0;
+  for (let i = 0; i < rgba.length; i += 4 * 7) { // 抽样，别遍历全部
+    const l = (rgba[i] * 0.299 + rgba[i + 1] * 0.587 + rgba[i + 2] * 0.114) / 255;
+    if (l > 0.9) light++;
+    total++;
+  }
+  // 超过一半是接近纯白的像素 → 拼出来是大片白
+  return total > 0 && light / total < 0.5;
+}
+
+/**
+ * 挑一个能用的目标：从当前候选往后找，最多试 12 张。
+ * 只看清单里的宽高比挑不够——白底线稿宽高比合适，但拼出来是一片白。
+ */
+async function pickUsableTarget(from) {
+  const n = state.images.length;
+  let idx = wall.pickTarget(from);
+  for (let k = 0; k < Math.min(12, n); k++) {
+    const px = await loadTargetPixels(idx, { dry: true });
+    if (!px) break;
+    if (targetUsable(px.rgba, px.w, px.h)) return idx;
+    idx = wall.pickTarget(idx + 1);
+  }
+  return idx; // 都不合适就用最后一个，总比不显示强
+}
+
+/** 把一张图缩成小图、读出像素，作为马赛克的目标。dry=true 只返回像素不设置。 */
+function loadTargetPixels(index, { dry = false } = {}) {
   const im = state.images[index];
   if (!im) return Promise.resolve();
   return new Promise((resolve) => {
@@ -417,19 +446,18 @@ function loadTargetPixels(index) {
     img.onload = () => {
       // 长边 240 像素足够算格子平均色了
       const k = 240 / Math.max(img.naturalWidth, img.naturalHeight);
-      const w = Math.max(1, Math.round(img.naturalWidth * k * (k < 1 ? 1 : 1)));
+      const w = Math.max(1, Math.round(img.naturalWidth * k));
       const h = Math.max(1, Math.round(img.naturalHeight * k));
       const cv = document.createElement('canvas');
       cv.width = w; cv.height = h;
       const cx = cv.getContext('2d', { willReadFrequently: true });
       cx.drawImage(img, 0, 0, w, h);
+      let px = { rgba: null, w: 1, h: 1 };
       try {
-        const data = cx.getImageData(0, 0, w, h);
-        wall.setTarget({ rgba: data.data, w, h }, index);
-      } catch (_) {
-        wall.setTarget({ rgba: null, w: 1, h: 1 }, index);
-      }
-      resolve();
+        px = { rgba: cx.getImageData(0, 0, w, h).data, w, h };
+      } catch (_) { /* 跨域之类，保持空 */ }
+      if (dry) resolve(px);
+      else { wall.setTarget(px, index); resolve(px); }
     };
     img.onerror = () => resolve();
     // 用拼贴格那套缩略图：短边 480，够算平均色
@@ -612,12 +640,14 @@ function shuffle() {
   const b = $('btnShuffle');
   b.classList.remove('spin'); void b.offsetWidth; b.classList.add('spin');
   if (S.layout === 'mosaic') {
-    // 马赛克里「换一批」= 换一张目标图
-    const idx = wall.pickTarget(wall.nextTarget());
-    transition(() => {
-      wall.setSeed(state.seed);
-      loadTargetPixels(idx).then(updateMosaicOverlay);
-    });
+    // 马赛克里「换一批」= 换一张目标图。先挑好（要试几张图，是异步的），再走淡出淡入
+    const next = wall.nextTarget();
+    (async () => {
+      const idx = await pickUsableTarget(next);
+      await loadTargetPixels(idx);
+      transition(() => wall.setSeed(state.seed));
+      updateMosaicOverlay();
+    })();
     return;
   }
   transition(() => wall.setSeed(state.seed));
