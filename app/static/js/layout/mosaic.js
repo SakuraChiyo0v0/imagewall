@@ -66,7 +66,13 @@ export function buildMosaic(model, target, opts = {}) {
     tN++;
   }
   const tMed = tN ? tSum / tN : 0.5;
-  const shift = Math.max(-0.35, Math.min(0.35, libMed - tMed));
+  // 校正幅度：图库明显比目标暗时放宽一点（最多 0.5），否则亮图画不出来
+  const raw = libMed - tMed;
+  const shift = Math.max(-0.5, Math.min(0.5, raw < 0 ? raw * 1.25 : raw));
+
+  // 图库明度的分布宽度。窄（大家都差不多暗）就把对比度拉开
+  const spread = poolLum.length ? poolLum[Math.floor(poolLum.length * 0.9)] - poolLum[Math.floor(poolLum.length * 0.1)] : 1;
+  const contrast = spread < 0.25 ? 1.35 : spread < 0.4 ? 1.15 : 1;
 
   const rnd = rng(target.seed >>> 0);
   // 桶内顺序打乱：否则同一格永远配到同一张，整幅画都是同一张图
@@ -98,6 +104,10 @@ export function buildMosaic(model, target, opts = {}) {
       rgb = rgb.map((v) => Math.min(255, v + shift * 255 * (1 - v / 255)));
     } else if (shift < -0.01) {
       rgb = rgb.map((v) => Math.max(0, v * (1 + shift)));
+    }
+    // 对比度：图库色域窄时，不拉开一点层次整幅画会糊成一块
+    if (contrast !== 1) {
+      rgb = rgb.map((v) => Math.max(0, Math.min(255, 128 + (v - 128) * contrast)));
     }
     const want = (rgb[0] << 16) | (rgb[1] << 8) | rgb[2];
     // 本桶里找一个没用满、距离最近的；桶空就从全池里找
