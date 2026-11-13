@@ -52,6 +52,22 @@ export function buildMosaic(model, target, opts = {}) {
     if (!arr) buckets.set(q, (arr = []));
     arr.push(i);
   }
+  // 图库的色域往往比目标图窄（比如一堆深色截图去还原一张亮图），直接按绝对色距匹配
+  // 会把整幅画压成一片暗色。这里把目标色按图库实际的明度中位数做一次平移校正，
+  // 让「亮的地方」在这批图里也能找到相对最亮的那些。
+  const lum = (c) => ((c >> 16 & 255) * 0.299 + (c >> 8 & 255) * 0.587 + (c & 255) * 0.114) / 255;
+  const poolLum = pool.map((i) => lum(colors[i])).sort((a, b) => a - b);
+  const libMed = poolLum[poolLum.length >> 1];
+  // 目标图自身的平均明度
+  let tSum = 0, tN = 0;
+  const trg = target.rgba;
+  for (let i = 0; i < trg.length; i += 4 * 17) {
+    tSum += (trg[i] * 0.299 + trg[i + 1] * 0.587 + trg[i + 2] * 0.114) / 255;
+    tN++;
+  }
+  const tMed = tN ? tSum / tN : 0.5;
+  const shift = Math.max(-0.35, Math.min(0.35, libMed - tMed));
+
   const rnd = rng(target.seed >>> 0);
   // 桶内顺序打乱：否则同一格永远配到同一张，整幅画都是同一张图
   for (const arr of buckets.values()) {
@@ -77,6 +93,12 @@ export function buildMosaic(model, target, opts = {}) {
   };
 
   const pickFor = (rgb, gx, gy) => {
+    // 按图库的明度水平平移目标色（保持色相），避免整幅画被压暗
+    if (shift > 0.01) {
+      rgb = rgb.map((v) => Math.min(255, v + shift * 255 * (1 - v / 255)));
+    } else if (shift < -0.01) {
+      rgb = rgb.map((v) => Math.max(0, v * (1 + shift)));
+    }
     const want = (rgb[0] << 16) | (rgb[1] << 8) | rgb[2];
     // 本桶里找一个没用满、距离最近的；桶空就从全池里找
     let best = -1, bd = Infinity;

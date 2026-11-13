@@ -461,16 +461,14 @@ export class Wall {
       busy = true;
     }
 
+    // 列位移每帧都算：停稳的那一刻它要归零，而那一帧画面本来已经不脏了
+    if (this._applyColumnShift()) this.dirty = true;
     if (this.dirty) {
       this.dirty = false;
       this.plane.style.transform = `translate3d(${this.tx}px,${this.ty}px,0) scale(${this.z})`;
-      this._applyColumnShift(); // 先算好列偏移，新块建出来就落在对的位置
       this._render();
       this.hooks.onView && this.hooks.onView();
     }
-    // 从「在动」到「停稳」的那一帧：列位移要归零，画面得再画一次
-    if (this.cols.size && this._colMoved && !busy) { this._colMoved = false; this.dirty = true; this.kick(); }
-    else if (this.cols.size) this._colMoved = !!(this.pointers.size || this.vx || this.vy || this.zAnchor);
     this._pump();
     if (busy || this.dirty) this.kick();
   }
@@ -650,9 +648,7 @@ export class Wall {
     if (!g) {
       const el = document.createElement('div');
       el.className = 'col';
-      // 先按当前的列偏移摆好，再挂上去，避免第一帧跳一下
-      const extra = this.ty * (this.layout.parallax.speed(col) - 1);
-      el.style.transform = `translate3d(0,${extra}px,0)`;
+      // 位置由 _applyColumnShift 统一摆；这里不要用总位移预置，否则一打开页面各列就是歪的
       this.plane.appendChild(el);
       g = { el, speed: this.layout.parallax.speed(col), shift: 0 };
       this.cols.set(col, g);
@@ -661,33 +657,29 @@ export class Wall {
   }
 
   /**
-   * 错列视差：列容器整体上下挪一点。
-   * 平面已经带着 ty 平移过了，这里补的是「额外那一点」：屏幕位移 = ty × (速度 − 1)，
-   * 换算成平面内的世界单位要除以 z；块的 rectOf 用的也是同一个 g.shift。
-   * 只写几个 transform，不碰任何块。
-   */
-  /**
    * 错列视差：拖动时按列速度把每列上下挪一点，相邻列方向相反。
-   * 位移按「当前视图相对上一次停稳位置的偏移」算，所以停手后视图不再变、各列自然回到原来的位置，
-   * 画面不会一直歪着。只写几个 transform，不碰任何块。
+   * 位移按「当前视图相对上次停稳位置的偏移」算，所以停手后视图不再变、各列自然回到原位，画面不会一直歪着。
+   * 只写几个 transform，不碰任何块。返回是否发生了变化。
    */
   _applyColumnShift() {
-    if (!this.cols.size) return;
-    if (!this._restView) this._restView = { tx: this.tx, ty: this.ty };
-    // 正在动（拖动 / 惯性 / 缩放）时以停稳位置为基准；停稳后基准跟着走，位移归零
-    const moving = this.pointers.size || this.vx || this.vy || this.zAnchor;
-    if (!moving) { this._restView.tx = this.tx; this._restView.ty = this.ty; }
-    const dy = this.ty - this._restView.ty;
-    let moved = 0;
+    if (!this.cols.size) return false;
+    const moving = this.pointers.size > 0 || this.vx !== 0 || this.vy !== 0 || !!this.zAnchor;
+    // 基准 = 上一次停稳时的视图位置。停稳时马上对齐，所以停下之后一定是 0
+    if (!this._restView || !moving) this._restView = { tx: this.tx, ty: this.ty };
+    const dy = moving ? this.ty - this._restView.ty : 0;
+    let changed = false, moved = 0;
     for (const g of this.cols.values()) {
-      const extra = dy * (g.speed - 1);
-      if (g.last === extra) continue;
-      g.last = extra;
-      g.el.style.transform = `translate3d(0,${extra}px,0)`;
-      // 这一列的图整体挪了位置：内容变了，回收范围按它放大，别把块来回建了拆
+      // 平面已经整体挪了 dy，这里再补 dy × 速度：偶列多走一点、奇列往回一点，方向相反
+      const extra = dy * g.speed;
+      if (g.last !== extra) {
+        g.last = extra;
+        g.el.style.transform = extra === 0 ? '' : `translate3d(0,${extra}px,0)`;
+        changed = true;
+      }
       moved = Math.max(moved, Math.abs(extra));
     }
     this._colPad = moved;
+    return changed;
   }
 
   /** 点开某一块时，把周围的块推开（只给网格形式用，别的形式靠大图自己的飞出）。 */
