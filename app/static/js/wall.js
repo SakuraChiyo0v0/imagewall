@@ -197,6 +197,22 @@ export class Wall {
   pickTarget(from = 0) {
     const n = this.images.length;
     if (!n) return 0;
+    // 先找宽高比合适、且「有内容」的：纯白线稿、大面积留白的图拼出来是一片白，
+    // 看不出是一幅画。用主色的明度粗筛一下（太亮或几乎没有色彩的跳过）。
+    for (let k = 0; k < n; k++) {
+      const i = (from + k) % n;
+      const a = (this.images[i].a || 0) / 100;
+      if (a < 1.2 || a > 2.2) continue;
+      const c = this.colors && this.colors[i];
+      if (c != null && c >= 0) {
+        const r = (c >> 16) & 255, g = (c >> 8) & 255, bl = c & 255;
+        const lum = (r * 0.299 + g * 0.587 + bl * 0.114) / 255;
+        const sat = (Math.max(r, g, bl) - Math.min(r, g, bl)) / 255;
+        if (lum > 0.82 && sat < 0.1) continue; // 近白且几乎无色：跳过
+      }
+      return i;
+    }
+    // 都太素：退回第一个宽高比合适的
     for (let k = 0; k < n; k++) {
       const i = (from + k) % n;
       const a = (this.images[i].a || 0) / 100;
@@ -300,6 +316,7 @@ export class Wall {
     this.overviewFor = '';
     for (const g of this.cols.values()) g.el.remove();
     this.cols.clear();
+    this._restView = null;
     if (this._swap) { for (const rec of this._swap.values()) this._release(rec); this._swap = null; }
     for (const rec of this.tiles.values()) this._release(rec);
     this.tiles.clear();
@@ -440,6 +457,9 @@ export class Wall {
       this._render();
       this.hooks.onView && this.hooks.onView();
     }
+    // 从「在动」到「停稳」的那一帧：列位移要归零，画面得再画一次
+    if (this.cols.size && this._colMoved && !busy) { this._colMoved = false; this.dirty = true; this.kick(); }
+    else if (this.cols.size) this._colMoved = !!(this.pointers.size || this.vx || this.vy || this.zAnchor);
     this._pump();
     if (busy || this.dirty) this.kick();
   }
@@ -635,11 +655,23 @@ export class Wall {
    * 换算成平面内的世界单位要除以 z；块的 rectOf 用的也是同一个 g.shift。
    * 只写几个 transform，不碰任何块。
    */
+  /**
+   * 错列视差：拖动时按列速度把每列上下挪一点，相邻列方向相反。
+   * 位移按「当前视图相对上一次停稳位置的偏移」算，所以停手后视图不再变、各列自然回到原来的位置，
+   * 画面不会一直歪着。只写几个 transform，不碰任何块。
+   */
   _applyColumnShift() {
     if (!this.cols.size) return;
+    if (!this._restView) this._restView = { tx: this.tx, ty: this.ty };
+    // 正在动（拖动 / 惯性 / 缩放）时以停稳位置为基准；停稳后基准跟着走，位移归零
+    const moving = this.pointers.size || this.vx || this.vy || this.zAnchor;
+    if (!moving) { this._restView.tx = this.tx; this._restView.ty = this.ty; }
+    const dy = this.ty - this._restView.ty;
     let moved = 0;
     for (const g of this.cols.values()) {
-      const extra = this.ty * (g.speed - 1);          // 平面内（世界）像素
+      const extra = dy * (g.speed - 1);
+      if (g.last === extra) continue;
+      g.last = extra;
       g.el.style.transform = `translate3d(0,${extra}px,0)`;
       // 这一列的图整体挪了位置：内容变了，回收范围按它放大，别把块来回建了拆
       moved = Math.max(moved, Math.abs(extra));
