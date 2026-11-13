@@ -266,11 +266,13 @@ class ServerTest(unittest.TestCase):
         pal = self.js("/api/palette?path=" + quote("图片"))
         self.assertEqual(pal["count"], d["count"])
         self.assertEqual(len(pal["colors"]), d["count"])
-        for _ in range(150):
-            if self.js("/api/health")["dimsPending"] == 0:
+        # 颜色是后台算的，dimsPending 只反映尺寸队列：直接轮询色板直到补齐
+        pal = None
+        for _ in range(300):
+            pal = self.js("/api/palette?path=" + quote("图片"))
+            if pal["missing"] == 0:
                 break
             time.sleep(0.1)
-        pal = self.js("/api/palette?path=" + quote("图片"))
         self.assertEqual(pal["missing"], 0, pal["missing"])
         for c in pal["colors"]:
             self.assertGreaterEqual(c, 0)

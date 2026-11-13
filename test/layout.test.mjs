@@ -156,3 +156,25 @@ test('网格形式声明了「点开时推开周围」，其他形式没有', ()
     assert.equal(!!v.explodeOnOpen, L.id === 'grid', L.id);
   }
 });
+
+test('错列：相邻列的错速方向相反，静止时不偏移', () => {
+  const m = buildModel(images(300), 0);
+  const L = LAYOUTS.find((l) => l.id === 'columns').create(m);
+  assert.ok(L.parallax, '错列应声明 parallax');
+  for (const dy of [10, -10, 240]) {
+    const a = L.parallax.speed(0) * dy, b = L.parallax.speed(1) * dy;
+    assert.ok(Math.sign(a) === -Math.sign(b) && Math.abs(a) > 0, `dy=${dy} 方向应相反：${a} / ${b}`);
+  }
+  assert.equal(L.parallax.speed(0) * 0, 0, '静止时不应有偏移');
+});
+
+test('斜铺与错列的单元格高宽比合理（不出现细条）', () => {
+  const m = buildModel(images(300), 0);
+  for (const id of ['tiltscroll', 'columns']) {
+    const L = LAYOUTS.find((l) => l.id === id).create(m);
+    L.query(0, 0, 1200, 900, 280, (k, x, y, w, h) => {
+      const r = w / h;
+      assert.ok(r > 0.7 && r < 1.4, `${id} 格子比例异常 ${r.toFixed(2)}`);
+    });
+  }
+});

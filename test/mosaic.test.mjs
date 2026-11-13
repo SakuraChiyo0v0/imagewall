@@ -90,3 +90,24 @@ test('纯函数：同输入同输出', () => {
   const b = buildMosaic(model, t, { cols: 10, rows: 6 });
   assert.deepEqual([...a.cells], [...b.cells]);
 });
+
+test('图库比目标暗时，画面不会被压成一片暗色', () => {
+  // 图库里全是暗图（明度 0.15 左右），目标图是亮图（明度 0.75）
+  const images = Array.from({ length: 24 }, () => ({ a: 100 }));
+  const model = buildModel(images);
+  model.colors = images.map((_, i) => {
+    const base = 30 + (i % 4) * 6;
+    return grb(base, base + 4, base + 8);
+  });
+  const t = target(24, 24, () => [235, 230, 225]); // 很亮的目标
+  const m = buildMosaic(model, t, { cols: 12, rows: 12 });
+  const used = new Set(m.cells);
+  // 应该都挑到图库里相对最亮的那几张，而不是随机
+  const lums = [...used].map((i) => {
+    const c = model.colors[i];
+    return (c >> 16 & 255) * 0.299 + (c >> 8 & 255) * 0.587 + (c & 255) * 0.114;
+  });
+  const avg = lums.reduce((a, b) => a + b, 0) / lums.length;
+  const maxLib = Math.max(...model.colors.map((c) => (c >> 16 & 255) * 0.299));
+  assert.ok(avg > maxLib * 0.8, `平均亮度 ${avg.toFixed(1)} 应该接近图库里最亮的 ${maxLib}`);
+});
