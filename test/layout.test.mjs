@@ -114,3 +114,45 @@ test('步长与 n 互质', () => {
   const g = (a, b) => (b ? g(b, a % b) : a);
   for (const n of [1, 2, 3, 16, 100, 12455]) assert.equal(g(strideFor(n), n), 1);
 });
+
+test('斜铺：行高与格高一致（不留横缝）、行与行错开', () => {
+  const m = buildModel(images(300), 0);
+  const L = LAYOUTS.find((l) => l.id === 'tiltscroll').create(m);
+  const rows = new Map();
+  L.query(-1500, -1200, 1500, 1200, 280, (k, x, y, w, h) => {
+    rows.set(k.split(',')[0], { y, h, x });
+  });
+  const list = [...rows.values()].sort((a, b) => a.y - b.y);
+  assert.ok(list.length >= 4);
+  for (let i = 1; i < list.length; i++) {
+    assert.ok(Math.abs(list[i].y - (list[i - 1].y + list[i - 1].h)) < 0.01, '行之间有缝');
+    assert.ok(list[i].x !== list[i - 1].x, '行没有斜铺错位');
+  }
+});
+
+test('错列：相邻列纵向错位，且列内不重叠', () => {
+  const m = buildModel(images(300), 0);
+  const L = LAYOUTS.find((l) => l.id === 'columns').create(m);
+  const perCol = new Map();
+  L.query(0, -1200, 2000, 1200, 280, (k, x, y, w, h, idx, short, col) => {
+    if (!perCol.has(col)) perCol.set(col, []);
+    perCol.get(col).push({ x, y, h, key: k });
+  });
+  assert.ok(perCol.size >= 3, '列数太少');
+  const starts = [...perCol.values()].map((a) => Math.min(...a.map((v) => v.y)));
+  assert.ok(new Set(starts.map((v) => Math.round(v))).size > 1, '各列没有错开');
+  for (const arr of perCol.values()) {
+    const sorted = arr.sort((a, b) => a.y - b.y);
+    for (let i = 1; i < sorted.length; i++) {
+      assert.ok(sorted[i].y >= sorted[i - 1].y + sorted[i - 1].h - 0.01, '同列重叠');
+    }
+  }
+});
+
+test('网格形式声明了「点开时推开周围」，其他形式没有', () => {
+  const m = buildModel(images(50), 0);
+  for (const L of LAYOUTS) {
+    const v = L.create(m);
+    assert.equal(!!v.explodeOnOpen, L.id === 'grid', L.id);
+  }
+});

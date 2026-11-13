@@ -27,7 +27,7 @@ from urllib.parse import parse_qs, quote, urlparse
 
 from PIL import Image, ImageOps, features
 
-VERSION = "1.3.3"
+VERSION = "1.4.0"
 
 
 def _env_int(name: str, default: int) -> int:

@@ -24,7 +24,7 @@ const SIDE_FRAC = 0.21;  // 两侧各占的屏幕宽度比例（中间图只占�
 const FAR_SCALE = 0.5;   // 再往外一张的缩放
 
 export class Lightbox {
-  constructor({ getList, getOpt, rectFor, thumbFor, thumbElFor, onOpen, onClose }) {
+  constructor({ getList, getOpt, rectFor, thumbFor, thumbElFor, onOpen, onClose, onCloseEnd }) {
     this.getList = getList;
     this.getOpt = getOpt;
     this.rectFor = rectFor;
@@ -32,6 +32,7 @@ export class Lightbox {
     this.thumbElFor = thumbElFor || (() => null);
     this.onOpen = onOpen;
     this.onClose = onClose;
+    this.onCloseEnd = onCloseEnd;
     this.root = $('lightbox');
     this.stage = $('lbStage');
     this.track = $('lbTrack');
@@ -146,6 +147,8 @@ export class Lightbox {
       this.slides.clear();
     }, 320);
     this.onClose && this.onClose(im);
+    // 等大图淡出的那一下过完，再把画布上推开的块收回来，两段动画不抢
+    setTimeout(() => this.onCloseEnd && this.onCloseEnd(im), 260);
   }
 
   step(d) {

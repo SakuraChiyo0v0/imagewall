@@ -20,6 +20,8 @@ export const grid = {
   label: '网格',
   create(model) {
     return {
+      // 点开一张时，周围的图被推开、散向四周（模仿 Codrops 的 Grid Zoom）
+      explodeOnOpen: true,
       query(x0, y0, x1, y1, C, cb) {
         const bw = BS * C;
         for (let by = Math.floor(y0 / bw); by <= Math.floor(y1 / bw); by++)
