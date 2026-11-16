@@ -419,6 +419,12 @@ export class Wall {
     }
   }
 
+  /** 平面的变换。斜铺形式额外把整面墙转一点角度，行才会真的「斜」。 */
+  _transformCss() {
+    const rot = this.layoutId === 'tiltscroll' ? ' rotate(-6deg)' : '';
+    return `translate3d(${this.tx}px,${this.ty}px,0) scale(${this.z})${rot}`;
+  }
+
   _frame(t) {
     this.raf = 0;
     const dt = Math.min(64, t - this.lastT || 16);
@@ -465,7 +471,7 @@ export class Wall {
     if (this._applyColumnShift()) this.dirty = true;
     if (this.dirty) {
       this.dirty = false;
-      this.plane.style.transform = `translate3d(${this.tx}px,${this.ty}px,0) scale(${this.z})`;
+      this.plane.style.transform = this._transformCss();
       this._render();
       this.hooks.onView && this.hooks.onView();
     }
@@ -495,7 +501,9 @@ export class Wall {
     const C = this.cell, G = this.gap, z = this.z;
     const vw = this.stage.clientWidth, vh = this.stage.clientHeight;
     // 加载区：视口外一圈；保留区再大一圈。只有出了保留区的块才回收
-    const pad = C * 0.6, keep = C * 2.2;
+    // 斜铺时整面墙转了 6°，按轴对齐的视口算裁剪会在角上露白：pad 放大兜住
+    const rotPad = this.layoutId === 'tiltscroll' ? Math.max(vw, vh) * 0.12 : 0;
+    const pad = C * 0.6 + rotPad / this.z, keep = C * 2.2 + rotPad / this.z;
     const x0 = -this.tx / z, y0 = -this.ty / z;
     const x1 = (vw - this.tx) / z, y1 = (vh - this.ty) / z;
     // 防御：万一比例尺算错，宁可不画也不要卡死
@@ -556,7 +564,7 @@ export class Wall {
       const zc = this.z;
       this.tx = (vw - (x1 - x0) * zc) / 2;
       this.ty = (vh - (y1 - y0) * zc) / 2;
-      this.plane.style.transform = `translate3d(${this.tx}px,${this.ty}px,0) scale(${this.z})`;
+      this.plane.style.transform = this._transformCss();
     } else {
       x0 = -this.tx / this.z; y0 = -this.ty / this.z;
       x1 = (vw - this.tx) / this.z; y1 = (vh - this.ty) / this.z;

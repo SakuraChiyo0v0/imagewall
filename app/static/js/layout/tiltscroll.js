@@ -5,7 +5,7 @@
 
 import { blockBase, strideFor } from './hash.js';
 
-const SHEAR = 0.32;   // 每往下一行，横向多错开多少（× 格宽）
+const SHEAR = 0.85;   // 每往下一行，横向多错开多少（× 格宽）。太小看不出「斜」，太大行会断成一节节
 const H_RATIO = 1.15; // 行高 / 格宽（含行间缝）
 const MAXLEN = 12;    // 同一行最多试这么多种「每轮几张」
 
@@ -69,6 +69,7 @@ export const tiltscroll = {
             // 高用 RH：否则每行下面会露出 H_RATIO−1 那一截空洞
             cb('t' + row + ',' + c, x, y, C, RH, idx, Math.min(1, RH / C));
           }
+          void span;
         }
       },
     };
