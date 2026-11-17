@@ -471,8 +471,8 @@ function maybeAutoWarm() {
 
 // ------------------------------------------------------------ 顶栏按钮
 
-$('btnZoomIn').onclick = () => wall.zoomAboutContent(1.25);
-$('btnZoomOut').onclick = () => wall.zoomAboutContent(1 / 1.25);
+$('btnZoomIn').onclick = () => wall.zoomCenter(1.25);
+$('btnZoomOut').onclick = () => wall.zoomCenter(1 / 1.25);
 $('zoomText').onclick = () => wall.zoomCenter(1 / wall.zTarget);
 
 /** 整面墙换内容：旧墙淡出，换完新墙逐块落定。 */
@@ -531,9 +531,9 @@ window.addEventListener('keydown', (e) => {
   else if (k === 'ArrowRight') wall.nudge(-step, 0);
   else if (k === 'ArrowUp') wall.nudge(0, step);
   else if (k === 'ArrowDown') wall.nudge(0, -step);
-  else if (k === '+' || k === '=') wall.zoomAboutContent(1.2);
-  else if (k === '-' || k === '_') wall.zoomAboutContent(1 / 1.2);
-  else if (k === '0') wall.zoomAboutContent(1 / wall.zTarget);
+  else if (k === '+' || k === '=') wall.zoomCenter(1.2);
+  else if (k === '-' || k === '_') wall.zoomCenter(1 / 1.2);
+  else if (k === '0') wall.zoomCenter(1 / wall.zTarget);
   else if (k === 'f' || k === 'F') $('btnFolder').click();
   else if (k === 's' || k === 'S') $('btnSettings').click();
   else if (k === 'r' || k === 'R') shuffle();

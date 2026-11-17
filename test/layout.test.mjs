@@ -178,3 +178,20 @@ test('斜铺与错列的单元格高宽比合理（不出现细条）', () => {
     });
   }
 });
+
+test('前端不引用已删除的代码', async () => {
+  const { readFileSync, readdirSync } = await import('node:fs');
+  const { join, dirname } = await import('node:path');
+  const { fileURLToPath } = await import('node:url');
+  const root = join(dirname(fileURLToPath(import.meta.url)), '..', 'app', 'static', 'js');
+  const walk = (dir) =>
+    readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
+      e.isDirectory() ? walk(join(dir, e.name)) : [join(dir, e.name)]);
+  const gone = ['zoomAboutContent', 'buildMosaic', 'updateMosaicOverlay', '/mosaic.js', 'mosaic.js'];
+  const bad = [];
+  for (const f of walk(root).filter((x) => x.endsWith('.js'))) {
+    const text = readFileSync(f, 'utf8');
+    for (const name of gone) if (text.includes(name)) bad.push(join(f.split(join('js', ''))[1] || f, name));
+  }
+  assert.deepEqual(bad, [], '还有指向已删代码的引用：' + bad.join(', '));
+});
