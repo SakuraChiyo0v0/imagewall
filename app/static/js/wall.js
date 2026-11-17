@@ -10,7 +10,6 @@
 //   3. 换更清晰的图时，新图在旧图上面淡入，旧图等新图完全显示后才移除，中间永远有图。
 
 import { getLayout, buildModel } from './layout/index.js';
-import { buildMosaic } from './layout/mosaic.js';
 import { clamp } from './util.js';
 import { thumbUrl } from './api.js';
 
@@ -73,10 +72,6 @@ export class Wall {
     this.zTarget = 1; this.zAnchor = null;
     this.cell = 280; this.gap = 4; this.seed = 0;
     this.layoutId = 'collage';
-    // 马赛克用：每张图的主色（-1 未知）、目标图（下标），以及算好的整幅格子表
-    this.colors = null;
-    this.mosaicTarget = 0;
-    this.targetPixels = null;
     this.images = []; this.model = buildModel([]); this.layout = null;
     this.opt = { q: 78, fmt: 'jpeg', cap: 640, dpr: 1 };
     this.motion = true;
@@ -159,92 +154,11 @@ export class Wall {
 
   _rebuild() {
     this.model = buildModel(this.images, this.seed);
-    this.model.colors = this.colors;
-    if (this.layoutId === 'mosaic') this.model.mosaic = this._mosaicTable();
     this.layout = getLayout(this.layoutId).create(this.model);
     this.clear();
     this.invalidate();
-    if (this.layoutId === 'mosaic') {
-      if (!this.layout.bounded) {
-        this.hooks.onMosaicEmpty && this.hooks.onMosaicEmpty();
-      } else if (!this.mosaicFitted) {
-        // 第一次进马赛克（含刷新后直接进）：把整幅画装进视口，否则手机上只能看到几格
-        this.mosaicFitted = true;
-        requestAnimationFrame(() => this.fitBounded());
-      }
-    } else {
-      this.mosaicFitted = false;
-    }
-  }
-
-  /** 每张图的主色（马赛克用）。拿到后如果正在马赛克形式，重算一次。 */
-  setColors(colors) {
-    this.colors = colors;
-    if (this.layoutId === 'mosaic') this._rebuild();
-  }
-
-  /** 目标图像素：{ rgba, w, h }（由外部从缩略图画出来）。设置后重算马赛克。 */
-  setTarget(pixels, index) {
-    this.targetPixels = pixels;
-    if (index != null) this.mosaicTarget = index;
-    if (this.layoutId === 'mosaic') {
-      this.mosaicFitted = false; // 换了目标图，格子数会变，重新适配一次
-      this._rebuild();
-    }
-  }
-
-  /** 换一张目标图（同一次「换一批」）。 */
-  nextTarget() {
-    const n = this.images.length;
-    if (!n) return 0;
-    this.mosaicTarget = (this.mosaicTarget + 1 + ((this.seed * 7) % Math.max(1, n - 1))) % n;
-    return this.mosaicTarget;
-  }
-
-  /**
-   * 挑一张适合当马赛克的图：优先横图（屏幕是横的，竖图会缩得很小），
-   * 尺寸已知、不是太细长的。找不到就退回固定的第一张。
-   */
-  pickTarget(from = 0) {
-    const n = this.images.length;
-    if (!n) return 0;
-    // 先找宽高比合适、且「有内容」的：纯白线稿、大面积留白的图拼出来是一片白，
-    // 看不出是一幅画。用主色的明度粗筛一下（太亮或几乎没有色彩的跳过）。
-    for (let k = 0; k < n; k++) {
-      const i = (from + k) % n;
-      const a = (this.images[i].a || 0) / 100;
-      if (a < 1.2 || a > 2.2) continue;
-      const c = this.colors && this.colors[i];
-      if (c != null && c >= 0) {
-        const r = (c >> 16) & 255, g = (c >> 8) & 255, bl = c & 255;
-        const lum = (r * 0.299 + g * 0.587 + bl * 0.114) / 255;
-        const sat = (Math.max(r, g, bl) - Math.min(r, g, bl)) / 255;
-        if (lum > 0.82 && sat < 0.1) continue; // 近白且几乎无色：跳过
-      }
-      return i;
-    }
-    // 都太素：退回第一个宽高比合适的
-    for (let k = 0; k < n; k++) {
-      const i = (from + k) % n;
-      const a = (this.images[i].a || 0) / 100;
-      if (a >= 1.2 && a <= 2.2) return i;
-    }
-    return from % n;
-  }
-
-  _mosaicTable() {
-    if (!this.colors || !this.targetPixels) return null;
-    const im = this.images[this.mosaicTarget];
-    if (!im) return null;
-    // 格子数：目标图切成 cols×rows 格。格子越多越像原图，但每格越小；
-    // 上限受图库规模约束（每格一张不重样最好看），长边最多 120 格
-    const a = this.targetPixels.w / this.targetPixels.h || 1;
-    const n = this.images.length;
-    const budget = Math.max(400, Math.min(9000, n * 3));
-    const long = Math.round(Math.min(120, Math.max(24, Math.sqrt(budget / Math.max(a, 1 / a)))));
-    const cols = Math.max(8, Math.round(a >= 1 ? long : long * a));
-    const rows = Math.max(8, Math.round(a >= 1 ? long / a : long));
-    return buildMosaic(this.model, { ...this.targetPixels, seed: this.seed + 1 }, { cols, rows });
+    // 换形式后缩放可能还停在上一形式的极小值（远景/近景），回到 100% 免得「一切换就是一片色块」
+    if (this.z < ZOVERVIEW) this.zoomCenter(1 / this.z);
   }
 
   setLayout(cell, gap) {
@@ -299,16 +213,6 @@ export class Wall {
     this.zoomAt(this.stage.clientWidth / 2, this.stage.clientHeight / 2, factor);
   }
 
-  /** 有边界的布局里，缩小时以「整幅画的中心」为锚，这样越缩越能看到全局而不是漂出画外。 */
-  zoomAboutContent(factor) {
-    const b = this.bounds();
-    if (!b) return this.zoomCenter(factor);
-    const C = this.cell;
-    const cx = (b.cols * C) / 2, cy = (b.rows * C) / 2;
-    const sx = cx * this.z + this.tx, sy = cy * this.z + this.ty;
-    this.zoomAt(sx, sy, factor);
-  }
-
   /** 平移一段距离（屏幕 px）。有动效时转成初速度，滑过去。 */
   nudge(dx, dy) {
     this._touch();
@@ -356,27 +260,6 @@ export class Wall {
       if (d < bd) { bd = d; best = rec; }
     }
     return best;
-  }
-
-  /** 这个形式是不是有边界的（马赛克是一幅画，其他无限）。 */
-  bounds() {
-    return (this.layout && this.layout.bounded) || null;
-  }
-
-  /** 把视图摆到整幅画的左上角附近（切到马赛克时用）。 */
-  fitBounded() {
-    const b = this.bounds();
-    if (!b) return;
-    const vw = this.stage.clientWidth, vh = this.stage.clientHeight;
-    const W = b.cols * this.cell, H = b.rows * this.cell;
-    // 装得下就整幅居中；缩放下限允许到 ZMIN（远景会走色块画，不会卡）
-    const z = Math.min(1.6, Math.min(vw / W, vh / H) * 0.94);
-    this.z = this.zTarget = clamp(z, ZMIN, 2.4);
-    this.tx = (vw - W * this.z) / 2;
-    this.ty = (vh - H * this.z) / 2;
-    this.zAnchor = null;
-    this.vx = this.vy = 0;
-    this.invalidate();
   }
 
   /** 当前视口内的块（大图背景用）。 */
@@ -546,29 +429,16 @@ export class Wall {
   /**
    * 远景：世界坐标 → 一张固定分辨率的 canvas，每个块只画一个颜色。
    *
-   * 块的颜色来自「已经解码过的缩略图」的一个像素（没有就取主色），所以不用重新下载任何东西。
-   * 分辨率按世界范围定，缩放变化时重画，但只在真正需要时（比例尺变了）才重画。
+   * 块的颜色取自「已经解码过的缩略图」的一个像素，所以不用重新下载任何东西。
+   * 分辨率按可见范围定，缩放变化时重画。
    */
   _renderOverview() {
     if (this.tiles.size) this.clear();
     const C = this.cell;
     const vw = this.stage.clientWidth, vh = this.stage.clientHeight;
     const dpr = Math.min(2, window.devicePixelRatio || 1);
-    const b = this.bounds();
-    let x0, y0, x1, y1;
-    if (b) {
-      // 有边界（马赛克）：远景就是把整幅画铺在屏幕里，跟着相机漂没意义
-      x0 = 0; y0 = 0;
-      x1 = b.cols * C; y1 = b.rows * C;
-      // 顺便把相机摆正，这样放大回来时正好从整幅画开始
-      const zc = this.z;
-      this.tx = (vw - (x1 - x0) * zc) / 2;
-      this.ty = (vh - (y1 - y0) * zc) / 2;
-      this.plane.style.transform = this._transformCss();
-    } else {
-      x0 = -this.tx / this.z; y0 = -this.ty / this.z;
-      x1 = (vw - this.tx) / this.z; y1 = (vh - this.ty) / this.z;
-    }
+    const x0 = -this.tx / this.z, y0 = -this.ty / this.z;
+    const x1 = (vw - this.tx) / this.z, y1 = (vh - this.ty) / this.z;
     if (x1 <= x0 || y1 <= y0) return;
     const worldW = x1 - x0, worldH = y1 - y0;
     // canvas 直接就是「这段世界范围在屏幕上的像素」，一个 CSS 像素画一格，不用再缩放
@@ -605,14 +475,10 @@ export class Wall {
     });
   }
 
-  /** 一张图的代表色：优先从已解码的缩略图取一个像素，没有就用色板里的主色。 */
+  /** 一张图的代表色：从已解码的缩略图取一个像素；没下载过的用占位色（远景不需要精确颜色）。 */
   _colorOf(idx) {
     const im = this.images[idx];
     if (!im) return '#111';
-    // 色板优先：它本来就有每张图的主色，远景不需要为取色去下载任何东西
-    const c = this.colors && this.colors[idx];
-    if (c >= 0) return `rgb(${c >> 16 & 255},${c >> 8 & 255},${c & 255})`;
-    // 没有色板（不是马赛克那套数据）时，退回到已解码缩略图的像素
     const hit = this.cache.best(im, this.opt, 240);
     if (hit && hit.el) {
       const sc = this._sampleColor(hit.el);

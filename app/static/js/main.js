@@ -4,7 +4,6 @@ import * as settings from './settings.js';
 import { Wall } from './wall.js';
 import { Lightbox } from './lightbox.js';
 import { LAYOUTS, getLayout } from './layout/index.js';
-import { thumbUrl } from './api.js';
 
 const S = settings.load();
 const state = { path: '', images: [], roots: [], webp: false, seed: 0, loadToken: 0 };
@@ -28,14 +27,10 @@ const wall = new Wall($('stage'), $('plane'), {
     clearTimeout(movingTimer);
     movingTimer = setTimeout(() => { document.documentElement.classList.remove('moving'); movingTimer = 0; }, 700);
   },
-  onMosaicEmpty: () => {
-    toast('主色还在后台算，等一会儿再切马赛克', 3200);
-  },
   onNet: (fast) => {
     if (!fast) toast('网络较慢：先显示小图，停下后再换清晰的', 3200);
   },
   onView: () => {
-    updateMosaicOverlay();
     // 每帧都会调到这里：文字没变就别碰 DOM（重设 textContent 会让顶栏整块重新排版重绘）
     const zt = Math.round(wall.z * 100) + '%';
     if (zt !== lastZoomText) { lastZoomText = zt; $('zoomText').textContent = zt; }
@@ -52,12 +47,10 @@ function fmtOf() {
 function applySettings() {
   document.documentElement.classList.toggle('calm', !S.motion);
   document.body.classList.toggle('names', S.names);
-  document.body.classList.toggle('layout-mosaic', S.layout === 'mosaic');
   document.documentElement.style.setProperty('--r', S.gap ? '6px' : '0px');
   wall.setMotion(S.motion);
   wall.setLayoutType(getLayout(S.layout).id);
   wall.setLayout(S.cell, S.gap);
-  if (S.layout === 'mosaic' && state.images.length) ensureMosaic();
   wall.setThumbOptions({
     q: S.q,
     fmt: fmtOf(),
@@ -182,14 +175,11 @@ async function loadFolder(path, { refresh = false, keepView = false } = {}) {
       $('countText').textContent = fmtCount(d.images.length) + ' 张';
       wall.extendImages(d.images);
       maybeAutoWarm();
-      if (S.layout === 'mosaic') ensureMosaic();
       if (d.missing) prefetchDims(path, token);
     }).catch(() => {});
     return;
   }
   maybeAutoWarm();
-  // 马赛克形式：清单到了才有力气算（色板 + 目标图像素）
-  if (S.layout === 'mosaic') ensureMosaic();
   if (data.missing) prefetchDims(path, token);
 }
 
@@ -368,134 +358,7 @@ const LAYOUT_TIPS = {
   grid: '整齐的方格，点开一张时周围的图会被推开。',
   tiltscroll: '斜铺：整面网格斜着铺开，越往右下的行越往右错，拖动时纵深很强。',
   columns: '错列：一排排竖列，相邻列错开半行，拖动时上下反向错动。',
-  mosaic: '照片马赛克：远看是一张大图，放大后每个点都是你的一张图。换一批会换目标图。',
 };
-// ------------------------------------------------------------ 马赛克
-
-let paletteFor = '';       // 色板已经拉过的文件夹
-let paletteBusy = false;
-
-/** 切到马赛克时要用的东西：色板 + 目标图像素。缺什么补什么。 */
-async function ensureMosaic() {
-  if (!state.images.length) return;
-  const token = state.loadToken;
-  if (paletteFor !== state.path) {
-    if (paletteBusy) return;
-    paletteBusy = true;
-    try {
-      const pal = await api.palette(state.path);
-      if (token !== state.loadToken) return;
-      paletteFor = state.path;
-      wall.setColors(pal.colors || []);
-      if (pal.missing) {
-        // 后台还在算：过几秒自己再来一次
-        setTimeout(() => { if (paletteFor === state.path) { paletteFor = ''; if (S.layout === 'mosaic') ensureMosaic(); } }, 6000);
-      }
-    } catch (e) {
-      toast('取主色失败：' + e.message);
-    } finally {
-      paletteBusy = false;
-    }
-  }
-  if (!wall.targetPixels) {
-    // 第一次进马赛克：挑一张「宽高比合适、并且内容不空白」的当目标
-    if (!wall.mosaicPicked) {
-      wall.mosaicPicked = true;
-      wall.mosaicTarget = await pickUsableTarget(wall.mosaicTarget);
-    }
-    await loadTargetPixels(wall.mosaicTarget);
-  }
-}
-
-/** 这张图适不适合当马赛克目标：大片留白的（纯白线稿、文字页）拼出来是一片白。 */
-function targetUsable(rgba, w, h) {
-  if (!rgba) return false;
-  let light = 0, total = 0;
-  for (let i = 0; i < rgba.length; i += 4 * 7) { // 抽样，别遍历全部
-    const l = (rgba[i] * 0.299 + rgba[i + 1] * 0.587 + rgba[i + 2] * 0.114) / 255;
-    if (l > 0.9) light++;
-    total++;
-  }
-  // 超过一半是接近纯白的像素 → 拼出来是大片白
-  return total > 0 && light / total < 0.5;
-}
-
-/**
- * 挑一个能用的目标：从当前候选往后找，最多试 12 张。
- * 只看清单里的宽高比挑不够——白底线稿宽高比合适，但拼出来是一片白。
- */
-async function pickUsableTarget(from) {
-  const n = state.images.length;
-  let idx = wall.pickTarget(from);
-  for (let k = 0; k < Math.min(12, n); k++) {
-    const px = await loadTargetPixels(idx, { dry: true });
-    if (!px) break;
-    if (targetUsable(px.rgba, px.w, px.h)) return idx;
-    idx = wall.pickTarget(idx + 1);
-  }
-  return idx; // 都不合适就用最后一个，总比不显示强
-}
-
-/** 把一张图缩成小图、读出像素，作为马赛克的目标。dry=true 只返回像素不设置。 */
-function loadTargetPixels(index, { dry = false } = {}) {
-  const im = state.images[index];
-  if (!im) return Promise.resolve();
-  return new Promise((resolve) => {
-    const img = new Image();
-    img.crossOrigin = 'anonymous';
-    img.onload = () => {
-      // 长边 240 像素足够算格子平均色了
-      const k = 240 / Math.max(img.naturalWidth, img.naturalHeight);
-      const w = Math.max(1, Math.round(img.naturalWidth * k));
-      const h = Math.max(1, Math.round(img.naturalHeight * k));
-      const cv = document.createElement('canvas');
-      cv.width = w; cv.height = h;
-      const cx = cv.getContext('2d', { willReadFrequently: true });
-      cx.drawImage(img, 0, 0, w, h);
-      let px = { rgba: null, w: 1, h: 1 };
-      try {
-        px = { rgba: cx.getImageData(0, 0, w, h).data, w, h };
-      } catch (_) { /* 跨域之类，保持空 */ }
-      if (dry) resolve(px);
-      else { wall.setTarget(px, index); resolve(px); }
-    };
-    img.onerror = () => resolve();
-    // 用拼贴格那套缩略图：短边 480，够算平均色
-    img.src = thumbUrl(im, 480, { q: 85, fmt: 'jpeg' });
-  });
-}
-
-let overlayEl = null;
-/** 马赛克上叠一层半透明目标图：远看更清楚，放大后淡出，免得挡着每张小图。 */
-function updateMosaicOverlay() {
-  // 缩得比远景阈值还小的时候不叠目标图：那时画的是色块，叠上去反而糊成一片
-  const on = S.layout === 'mosaic' && S.mosaicGhost && wall.z >= 0.22
-    && wall.targetPixels && state.images[wall.mosaicTarget];
-  if (!on) {
-    if (overlayEl) { overlayEl.remove(); overlayEl = null; }
-    return;
-  }
-  if (!overlayEl) {
-    overlayEl = document.createElement('img');
-    overlayEl.className = 'mosaic-ghost';
-    overlayEl.alt = '';
-    overlayEl.draggable = false;
-    $('plane').appendChild(overlayEl);
-  }
-  const im = state.images[wall.mosaicTarget];
-  const url = thumbUrl(im, 800, { q: 80, fmt: 'jpeg' });
-  if (overlayEl.src !== url) overlayEl.src = url;
-  // 尺寸对齐整幅画
-  const m = wall.model && wall.model.mosaic;
-  if (m) {
-    const C = wall.cell;
-    overlayEl.style.width = m.cols * C + 'px';
-    overlayEl.style.height = m.rows * C + 'px';
-  }
-  const z = wall.z;
-  overlayEl.style.opacity = String(Math.max(0, Math.min(S.mosaicGhostOpacity, (0.9 - z) * 1.4)));
-  overlayEl.classList.toggle('on', z < 0.9);
-}
 
 function paintLayouts() {
   const seg = $('segLayout');
@@ -515,8 +378,6 @@ function paintAll() {
   paintSeg('segGap', S.gap);
   $('tgNames').classList.toggle('on', S.names);
   $('tgMotion').classList.toggle('on', S.motion);
-  $('tgGhost').classList.toggle('on', S.mosaicGhost);
-  $('mosaicField').hidden = S.layout !== 'mosaic';
   $('segFmt').querySelector('[data-v="webp"]').disabled = !state.webp;
 }
 
@@ -529,14 +390,7 @@ function bindSeg(id, key, cast) {
     paintSeg(id, S[key]);
     if (key === 'layout') {
       $('layoutTip').textContent = LAYOUT_TIPS[S[key]] || '';
-      transition(() => {
-        applySettings();
-        // 切到有边界的形式（马赛克）时把整幅画摆进视口
-        if (S.layout === 'mosaic') {
-          const run = () => { wall.fitBounded(); updateMosaicOverlay(); };
-          setTimeout(run, 60);
-        }
-      });
+      transition(() => applySettings());
     } else applySettings();
   });
 }
@@ -549,7 +403,6 @@ bindSeg('segGap', 'gap', Number);
 
 $('tgNames').onclick = () => { S.names = !S.names; settings.save(S); paintAll(); applySettings(); };
 $('tgMotion').onclick = () => { S.motion = !S.motion; settings.save(S); paintAll(); applySettings(); };
-$('tgGhost').onclick = () => { S.mosaicGhost = !S.mosaicGhost; settings.save(S); paintAll(); updateMosaicOverlay(); };
 $('btnReload').onclick = () => { if (state.path) loadFolder(state.path, { refresh: true, keepView: true }); closeSheets(); };
 
 async function loadCacheStats() {
@@ -639,17 +492,6 @@ function shuffle() {
   state.seed = (state.seed + 1) % 100000;
   const b = $('btnShuffle');
   b.classList.remove('spin'); void b.offsetWidth; b.classList.add('spin');
-  if (S.layout === 'mosaic') {
-    // 马赛克里「换一批」= 换一张目标图。先挑好（要试几张图，是异步的），再走淡出淡入
-    const next = wall.nextTarget();
-    (async () => {
-      const idx = await pickUsableTarget(next);
-      await loadTargetPixels(idx);
-      transition(() => wall.setSeed(state.seed));
-      updateMosaicOverlay();
-    })();
-    return;
-  }
   transition(() => wall.setSeed(state.seed));
 }
 $('btnShuffle').onclick = shuffle;
