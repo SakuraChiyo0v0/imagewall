@@ -52,7 +52,9 @@ test('拼贴：图片 ≥ 16 张时 block 内不重复', () => {
   }
 });
 
-test('拼贴：格子形状跟着图走（裁切少）', () => {
+test('拼贴：形状排好之后再给格子挑对形状的图（裁切少）', () => {
+  // 注意：形状不再由图片决定（否则首屏小清单和完整清单会排出两种版式，
+  // 占位框和最终结果对不上）。形状先按位置定死，再挑尽量合适的图。
   const m = buildModel(images(2000), 0);
   let match = 0, total = 0, crop = 0;
   for (let by = 0; by < 40; by++)
@@ -61,11 +63,22 @@ test('拼贴：格子形状跟着图走（裁切少）', () => {
         const a = m.aspect[t.idx], c = t.w / t.h;
         total++;
         if ((a > 1.25 && c > 1) || (a < 0.8 && c < 1) || (a >= 0.8 && a <= 1.25 && c === 1)) match++;
-        // 被裁掉的面积比例
         crop += 1 - Math.min(a, c) / Math.max(a, c);
       }
-  assert.ok(match / total > 0.7, `形状匹配 ${(match / total * 100).toFixed(0)}%`);
+  assert.ok(match / total > 0.6, `形状匹配 ${(match / total * 100).toFixed(0)}%`);
   assert.ok(crop / total < 0.3, `平均裁掉 ${(crop / total * 100).toFixed(0)}%`);
+});
+
+test('拼贴：版式只由位置决定，与图片清单大小无关', () => {
+  // 首屏先用前几百张渲染，完整清单（上万张）到了再换。形状必须一模一样，
+  // 否则加载中的占位框和最终结果对不上（2×2 的框最后变成两三个小块）。
+  const short = buildModel(images(400), 0);
+  const full = buildModel(images(12455), 0);
+  for (let by = -8; by < 8; by++)
+    for (let bx = -8; bx < 8; bx++) {
+      const shape = (m) => collageBlock(bx, by, m).map((t) => `${t.x},${t.y},${t.w}x${t.h}`).join('|');
+      assert.equal(shape(short), shape(full), `block ${bx},${by} 的版式变了`);
+    }
 });
 
 test('拼贴：大小块都有，不是一片 1×1', () => {
