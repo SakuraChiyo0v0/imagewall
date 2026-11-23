@@ -9,6 +9,21 @@
 <link rel="icon" href="static/icon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="static/style.css">
 <link rel="modulepreload" href="static/js/main.js">
+<!-- 其余模块加 preload：不加的话浏览器要等 main.js 解析完才逐个发现，串成一条链，
+     外网下光模块加载就要 300ms 以上。加了一起点，并行下载。 -->
+<link rel="modulepreload" href="static/js/wall.js">
+<link rel="modulepreload" href="static/js/lightbox.js">
+<link rel="modulepreload" href="static/js/api.js">
+<link rel="modulepreload" href="static/js/util.js">
+<link rel="modulepreload" href="static/js/settings.js">
+<link rel="modulepreload" href="static/js/layout/index.js">
+<link rel="modulepreload" href="static/js/layout/collage.js">
+<link rel="modulepreload" href="static/js/layout/justified.js">
+<link rel="modulepreload" href="static/js/layout/grid.js">
+<link rel="modulepreload" href="static/js/layout/tiltscroll.js">
+<link rel="modulepreload" href="static/js/layout/columns.js">
+<link rel="modulepreload" href="static/js/layout/model.js">
+<link rel="modulepreload" href="static/js/layout/hash.js">
 </head>
 <body class="booting">
 <div id="stage" aria-label="图片墙画布"><div id="plane"></div></div>

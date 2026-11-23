@@ -599,22 +599,32 @@ export class Wall {
       el.appendChild(name);
       el._name = name;
     }
-    el.getAnimations().forEach((a) => a.cancel());
-    el.style.transform = '';
-    el.style.opacity = '';
+    // 拖动时每帧都在复用块，这里的每一次样式写入都会让浏览器重算一次这块，
+    // 所以只做必要的：位置尺寸必写；其余能跳过就跳过。
+    if (el._animating) { el.getAnimations().forEach((a) => a.cancel()); el._animating = false; }
+    if (el.style.transform) el.style.transform = '';
+    if (el.style.opacity) el.style.opacity = '';
     el.style.left = x + 'px';
     el.style.top = y + 'px';
     el.style.width = w + 'px';
     el.style.height = h + 'px';
-    // 占位色：用图片路径的哈希取一个暗色相；同一张图每次都是同一个颜色
-    let hh = 0;
-    for (let i = 0; i < im.p.length; i += 3) hh = (hh * 31 + im.p.charCodeAt(i)) | 0;
-    el.style.setProperty('--ph', String(Math.abs(hh) % 360));
-    // 整墙入场时按离屏幕中心的距离错开，像从中间铺开
-    const sx = (x + w / 2) * this.z + this.tx - this.stage.clientWidth / 2;
-    const sy = (y + h / 2) * this.z + this.ty - this.stage.clientHeight / 2;
-    el.style.setProperty('--d', Math.min(420, Math.hypot(sx, sy) * 0.35) + 'ms');
-    el._name.textContent = im.n;
+    // 占位色：同一张图永远同一个色相。哈希算一次就存进图片对象，别每次复用都重算整条路径
+    if (im._ph === undefined) {
+      let hh = 0;
+      for (let i = 0; i < im.p.length; i += 3) hh = (hh * 31 + im.p.charCodeAt(i)) | 0;
+      im._ph = String(Math.abs(hh) % 360);
+    }
+    el.style.setProperty('--ph', im._ph);
+    // --d 只给入场动画用；关了动效就不算，省掉一次 hypot 和一次样式写入
+    if (this.motion) {
+      el._animating = true;
+      const sx = (x + w / 2) * this.z + this.tx - this.stage.clientWidth / 2;
+      const sy = (y + h / 2) * this.z + this.ty - this.stage.clientHeight / 2;
+      el.style.setProperty('--d', Math.min(420, Math.hypot(sx, sy) * 0.35) + 'ms');
+    } else if (el.style.getPropertyValue('--d')) {
+      el.style.removeProperty('--d');
+    }
+    if (el._name.textContent !== im.n) el._name.textContent = im.n;
     el.classList.remove('err', 'loaded');
     const rec = { key, el, im, x, y, w, h, short, col, img: null, px: 0, want: 0, loader: null, gen: 0 };
     el._rec = rec;
@@ -647,8 +657,13 @@ export class Wall {
       rec.loader = null;
       this.active--;
     }
-    rec.el.getAnimations().forEach((a) => a.cancel());
-    for (const img of rec.el.querySelectorAll('img')) img.remove();
+    // querySelectorAll 会走一次选择器匹配；块里的元素只有名字和若干 <img>，直接按标签取更快
+    for (const child of [...rec.el.children]) if (child.tagName === 'IMG') child.remove();
+    const anims = rec.el.getAnimations();
+    if (anims.length) {
+      for (const a of anims) a.cancel();
+      rec.el._animating = false;
+    }
     rec.img = null;
     rec.el._rec = null;
     rec.el.remove();
